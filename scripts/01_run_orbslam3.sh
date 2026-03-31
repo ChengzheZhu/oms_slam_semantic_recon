@@ -45,6 +45,12 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="$PROJECT_DIR/output/sparse"
 fi
 
+# Convert OUTPUT_DIR to absolute path if it's relative
+if [[ "$OUTPUT_DIR" != /* ]]; then
+    OUTPUT_DIR="$PROJECT_DIR/$OUTPUT_DIR"
+fi
+
+# Create output directory
 mkdir -p "$OUTPUT_DIR"
 
 # Colors for output
@@ -106,19 +112,20 @@ export LD_LIBRARY_PATH=$ORB_SLAM3_DIR/lib:/usr/local/lib:$LD_LIBRARY_PATH
 # Run with or without viewer
 if [ -n "$HEADLESS_MODE" ]; then
     echo "Running in headless mode (no visualization)"
+    # Set environment variable to disable Pangolin viewer
+    export DISPLAY=""
     ./Examples/RGB-D/rgbd_tum \
         "$VOCAB_FILE" \
         "$CONFIG_FILE" \
         "$DATASET_DIR" \
-        "$ASSOCIATIONS_FILE" \
-        "$HEADLESS_MODE" || echo "Note: ORB_SLAM3 crashed during cleanup (this is normal)"
+        "$ASSOCIATIONS_FILE" || echo "Note: ORB_SLAM3 may crash during cleanup (this is normal)"
 else
     echo "Running with visualization enabled"
     ./Examples/RGB-D/rgbd_tum \
         "$VOCAB_FILE" \
         "$CONFIG_FILE" \
         "$DATASET_DIR" \
-        "$ASSOCIATIONS_FILE" || echo "Note: ORB_SLAM3 crashed during cleanup (this is normal)"
+        "$ASSOCIATIONS_FILE" || echo "Note: ORB_SLAM3 may crash during cleanup (this is normal)"
 fi
 
 # Check if trajectory files were generated (what matters)

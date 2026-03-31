@@ -1,0 +1,99 @@
+name: sam3_open3d
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Core Python
+  - python=3.13
+  - pip
+
+  # CUDA support (for PyTorch and Open3D)
+  - cudatoolkit=12.6
+
+  # Build essentials
+  - cmake
+  - gcc_linux-64
+  - gxx_linux-64
+
+  # Graphics and visualization dependencies (for Open3D)
+  - mesa-libgl-cos7-x86_64
+  - libglvnd-glx-cos7-x86_64
+  - libxcb
+  - libxau
+  - libxdmcp
+  - libxext
+  - libxfixes
+  - libxrender
+  - xorg-libx11
+  - xorg-libxext
+  - xorg-libxrandr
+  - xorg-libxi
+  - freeglut
+
+  # Image processing libraries
+  - jpeg
+  - libpng
+  - libtiff
+  - glew
+
+  # Qt (for Open3D GUI)
+  - qt6-main
+
+  # Intel dependencies (for Open3D optimization)
+  - tbb
+
+  # Scientific computing base packages
+  - numpy<2.0  # Open3D may have issues with numpy 2.x
+  - scipy
+  - scikit-learn
+  - scikit-image
+
+  # Visualization
+  - matplotlib
+  - pillow
+
+  # Utilities
+  - tqdm
+  - pyyaml
+  - jupyter
+  - ipython
+
+  # pip packages
+  - pip:
+      # PyTorch with CUDA 12.6
+      - torch==2.7.0
+      - torchvision==0.22.0
+      - torchaudio==2.7.0
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+
+      # Open3D (latest version)
+      - open3d>=0.18.0
+
+      # RealSense SDK
+      - pyrealsense2
+
+      # SAM3 dependencies
+      - timm>=1.0.17
+      - ftfy==6.1.1
+      - regex
+      - iopath>=0.1.10
+      - typing_extensions
+      - huggingface_hub
+
+      # SAM3 optional dependencies (notebooks)
+      - ipywidgets
+      - ipycanvas
+      - ipympl
+      - pycocotools
+      - decord
+      - opencv-python
+      - einops
+
+      # TEASER++ dependencies (for registration)
+      - pybind11
+
+      # Additional scientific libraries
+      - pandas
+
+      # SAM3 (editable install - will do manually)
+      # -e /home/chengzhe/projects/sam3

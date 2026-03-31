@@ -59,6 +59,10 @@ def main():
                        help='Start from step N (1=associations, 2=SLAM, 3=convert, 4=reconstruct)')
     parser.add_argument('--bag', type=str,
                        help='Override bag file path from config')
+    parser.add_argument('--segmented', action='store_true',
+                       help='Use segmented reconstruction (for high-res with limited GPU RAM)')
+    parser.add_argument('--num_segments', type=int,
+                       help='Number of segments (overrides config)')
 
     args = parser.parse_args()
 
@@ -112,12 +116,21 @@ def main():
 
     # Display configuration
     recon_mode = config.get('reconstruction', {}).get('mode', 'mesh')
+    use_segmented = args.segmented or config.get('reconstruction', {}).get('segmented', {}).get('enabled', False)
+
     print(f"\nConfiguration:")
     print(f"  Bag file: {config['dataset']['bag_file']}")
     print(f"  Frames dir: {config['dataset']['frames_dir']}")
     print(f"  Output dir: {output_base}")
     print(f"  Run name: {run_name}")
     print(f"  Reconstruction mode: {recon_mode}")
+
+    if use_segmented:
+        seg_config = config.get('reconstruction', {}).get('segmented', {})
+        num_segments = args.num_segments if args.num_segments else seg_config.get('num_segments', 4)
+        print(f"  Segmented reconstruction: ENABLED ({num_segments} segments)")
+        print(f"  Segment overlap: {seg_config.get('overlap', 10)} frames")
+
     if recon_mode in ['mesh', 'both']:
         print(f"  Mesh voxel size: {config['reconstruction']['mesh']['voxel_size']}m")
     if recon_mode in ['pointcloud', 'both']:
@@ -197,27 +210,58 @@ def main():
 
     # Step 4: Dense reconstruction
     recon_mode = config.get('reconstruction', {}).get('mode', 'mesh')
-    
+
+    # Check if segmented mode is enabled
+    use_segmented = args.segmented or config.get('reconstruction', {}).get('segmented', {}).get('enabled', False)
+
     if args.start_step <= 4:
         # Create pointcloud output directory if needed
         if recon_mode in ['pointcloud', 'both']:
             pointcloud_dir = os.path.join(dense_dir, config['output'].get('pointcloud_dir', 'pointclouds'))
             os.makedirs(pointcloud_dir, exist_ok=True)
-        
+
         # Run TSDF mesh reconstruction
         if recon_mode in ['mesh', 'both']:
             mesh_config = config['reconstruction']['mesh']
-            cmd = [
-                'python', 'scripts/03_dense_reconstruction.py',
-                '--frames_dir', frames_dir,
-                '--intrinsic', intrinsic_file,
-                '--trajectory', trajectory_o3d,
-                '--output', mesh_file,
-                '--voxel_size', str(mesh_config['voxel_size']),
-                '--depth_max', str(mesh_config['depth_max'])
-            ]
-            
-            if not run_command(cmd, "Step 4a: TSDF mesh reconstruction"):
+
+            if use_segmented:
+                # Use segmented reconstruction
+                seg_config = config.get('reconstruction', {}).get('segmented', {})
+                num_segments = args.num_segments if args.num_segments else seg_config.get('num_segments', 4)
+                overlap = seg_config.get('overlap', 10)
+                save_segments = seg_config.get('save_segments', False)
+
+                cmd = [
+                    'python', 'scripts/03b_segmented_reconstruction.py',
+                    '--frames_dir', frames_dir,
+                    '--intrinsic', intrinsic_file,
+                    '--trajectory', trajectory_o3d,
+                    '--output', mesh_file,
+                    '--num_segments', str(num_segments),
+                    '--voxel_size', str(mesh_config['voxel_size']),
+                    '--depth_max', str(mesh_config['depth_max']),
+                    '--overlap', str(overlap)
+                ]
+
+                if save_segments:
+                    cmd.append('--save_segments')
+
+                step_desc = f"Step 4a: Segmented TSDF mesh reconstruction ({num_segments} segments)"
+            else:
+                # Use standard reconstruction
+                cmd = [
+                    'python', 'scripts/03_dense_reconstruction.py',
+                    '--frames_dir', frames_dir,
+                    '--intrinsic', intrinsic_file,
+                    '--trajectory', trajectory_o3d,
+                    '--output', mesh_file,
+                    '--voxel_size', str(mesh_config['voxel_size']),
+                    '--depth_max', str(mesh_config['depth_max'])
+                ]
+
+                step_desc = "Step 4a: TSDF mesh reconstruction"
+
+            if not run_command(cmd, step_desc):
                 return 1
         
         # Run point cloud export

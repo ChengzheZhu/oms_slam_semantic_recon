@@ -1,16 +1,18 @@
 # ORB_SLAM3 + Open3D Dense Reconstruction Pipeline Configuration
 # Note: Paths can be absolute or relative to the project root directory
 
-# # Dataset Configuration
+# Dataset Configuration
+# Override these paths via CLI: --bag /path/to/recording.bag
+# or create a copy of this file and pass it with --config my_config.yaml
 dataset:
-#   # Path to RealSense bag file
-  bag_file: "/home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516_trimmed.bag"
+  # Path to RealSense bag file
+  bag_file: "/path/to/your/recording.bag"
 
-#   # Output directory for extracted frames (will be created if doesn't exist)
-  frames_dir: "/home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516_trimmed"
+  # Output directory for extracted frames (created automatically)
+  frames_dir: "/path/to/your/frames_output"
 
-#   # Camera intrinsics JSON file (will be created during frame extraction)
-  intrinsic_file: "/home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516_trimmed/intrinsic.json"
+  # Camera intrinsics JSON (created during frame extraction — leave as is)
+  intrinsic_file: "/path/to/your/frames_output/intrinsic.json"
 
 
 # Frame Extraction Settings
@@ -39,34 +41,49 @@ orbslam:
 reconstruction:
   # Reconstruction mode: "mesh", "pointcloud", or "both"
   mode: "both"
-  
+
   # TSDF Mesh Settings (when mode = "mesh" or "both")
   mesh:
     # TSDF voxel size in meters (smaller = higher resolution, more memory)
-    voxel_size: 0.01
-    
+    voxel_size: 0.005
+
     # Maximum depth in meters
-    depth_max: 3.0
-    
+    depth_max: 2.0
+
     # Depth truncation (distance beyond which depth is ignored)
-    depth_trunc: 3.0
-  
+    depth_trunc: 2.0
+
+  # Segmented Reconstruction Settings (for high-res with limited GPU RAM)
+  segmented:
+    # Enable segmented reconstruction (can also use --segmented flag)
+    enabled: true
+
+    # Number of segments to split the sequence into
+    # More segments = less GPU RAM per segment, but more processing time
+    num_segments: 4
+
+    # Number of overlapping frames between segments (reduces boundary artifacts)
+    overlap: 10
+
+    # Save individual segment meshes (for debugging/verification)
+    save_segments: true
+
   # Point Cloud Settings (when mode = "pointcloud" or "both")
   pointcloud:
     # Export merged point cloud
     export_merged: true
-    
+
     # Export individual frame point clouds
     export_individual: false
-    
+
     # Voxel size for downsampling (0 = no downsampling)
-    downsample_voxel: 0.01
-    
+    downsample_voxel: 0.005
+
     # Process every Nth frame (1 = all frames)
     frame_skip: 1
-    
+
     # Maximum depth in meters
-    depth_max: 3.0
+    depth_max: 2.0
 
 # Output Configuration
 output:

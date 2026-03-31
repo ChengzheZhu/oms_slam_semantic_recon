@@ -40,10 +40,16 @@ Thumbs.db
 data/*
 !data/.gitkeep
 
-# Temporary files
+# Temporary files and session-specific scripts
 *.log
 *.tmp
 .cache/
+run_sam3_reconstruction.txt
+continue_pipeline.sh
+next_steps.sh
+
+# Debug output directories
+debug_sam3_output/
 
 # ORB_SLAM3 submodule build artifacts
 external/orbslam3/build/
