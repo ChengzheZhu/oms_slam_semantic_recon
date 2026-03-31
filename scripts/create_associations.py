@@ -11,10 +11,26 @@ import argparse
 from pathlib import Path
 
 
-def create_associations(dataset_dir, output_file):
-    """Create association file from extracted RealSense frames."""
+def create_associations(dataset_dir, output_file, fps=30.0):
+    """
+    Create TUM association file from extracted RealSense frames.
+
+    Args:
+        fps: Effective frame rate of the extracted frames. If you extracted
+             with --stride N from a 30fps bag, pass fps=30/N so the FPS
+             limiter in rgbd_tum.cc paces frames at the correct interval
+             and gives the local-mapping / loop-closing threads enough time.
+    """
     color_dir = os.path.join(dataset_dir, 'color')
     depth_dir = os.path.join(dataset_dir, 'depth')
+
+    # Check for real timestamps saved during extraction
+    timestamps_file = os.path.join(dataset_dir, 'timestamps.txt')
+    real_timestamps = None
+    if os.path.exists(timestamps_file):
+        with open(timestamps_file) as f:
+            real_timestamps = [float(line.strip()) for line in f if line.strip()]
+        print(f"Using real bag timestamps from {timestamps_file}")
 
     # Get sorted lists of frames
     color_files = sorted([f for f in os.listdir(color_dir)
@@ -29,30 +45,33 @@ def create_associations(dataset_dir, output_file):
         print(f"WARNING: Mismatch in frame counts!")
 
     n_frames = min(len(color_files), len(depth_files))
-    print(f"Creating associations for {n_frames} frames")
+    print(f"Creating associations for {n_frames} frames at {fps:.1f} fps")
 
     with open(output_file, 'w') as f:
         for i in range(n_frames):
-            # Use frame index as timestamp (ORB_SLAM3 only needs relative timing)
-            timestamp = float(i) / 30.0  # Assuming 30 FPS
+            if real_timestamps and i < len(real_timestamps):
+                timestamp = real_timestamps[i]
+            else:
+                timestamp = float(i) / fps
 
-            # Write: timestamp rgb_path timestamp depth_path
             f.write(f"{timestamp:.6f} color/{color_files[i]} ")
             f.write(f"{timestamp:.6f} depth/{depth_files[i]}\n")
 
     print(f"\n✓ Association file created: {output_file}")
     print(f"  Frames: {n_frames}")
-    print(f"  Duration: {n_frames/30.0:.2f} seconds (at 30 FPS)")
+    print(f"  Duration: {n_frames/fps:.2f} seconds (at {fps:.1f} fps)")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Create TUM association file")
     parser.add_argument('--dataset', type=str,
-                       
-                       help='Dataset directory containing color/ and depth/ folders')
+                        help='Dataset directory containing color/ and depth/ folders')
     parser.add_argument('--output', type=str,
-                       
-                       help='Output association file')
+                        help='Output association file')
+    parser.add_argument('--fps', type=float, default=30.0,
+                        help='Effective FPS of extracted frames (default 30). '
+                             'Use 30/stride if frames were subsampled (e.g. 10 for stride=3). '
+                             'Ignored if timestamps.txt exists in the dataset dir.')
 
     args = parser.parse_args()
 
@@ -66,7 +85,7 @@ def main():
     # Create output directory
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
-    create_associations(args.dataset, args.output)
+    create_associations(args.dataset, args.output, fps=args.fps)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ fi
 
 # Tunable parameters
 FRAME_STRIDE=1          # extract every Nth frame for ORB-SLAM3 (1 = all)
+SLAM_FPS=30             # effective FPS fed to ORB-SLAM3 (= bag_fps / FRAME_STRIDE)
+                        # lower this to give loop-closing more breathing room
 FRAME_SUBSAMPLE=5       # use every Nth frame for SAM3 reconstruction
 VOXEL_SIZE=0.005        # TSDF voxel size in metres
 SAM3_PROMPT="individual stone"
@@ -71,7 +73,9 @@ python -u "$PROJECT_DIR/scripts/00_extract_frames.py" \
 # Step 1: ORB-SLAM3 tracking
 echo ""
 echo "[1/3] Running ORB-SLAM3 …"
-bash "$PROJECT_DIR/scripts/01_run_orbslam3.sh" "$FRAMES_DIR" "$OUTPUT_DIR/sparse" "$USE_VIEWER"
+VIEWER_ARG=""
+[ "$USE_VIEWER" = "false" ] && VIEWER_ARG="--headless"
+bash "$PROJECT_DIR/scripts/01_run_orbslam3.sh" "$FRAMES_DIR" "$OUTPUT_DIR/sparse" --fps "$SLAM_FPS" $VIEWER_ARG
 
 mkdir -p "$OUTPUT_DIR/sparse"
 cp "$PROJECT_DIR/external/orbslam3/CameraTrajectory.txt"  "$OUTPUT_DIR/sparse/"

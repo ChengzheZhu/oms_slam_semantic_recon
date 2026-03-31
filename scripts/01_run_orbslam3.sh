@@ -17,12 +17,17 @@ CONFIG_FILE="$PROJECT_DIR/config/camera/RealSense_D456.yaml"
 HEADLESS_MODE=""
 DATASET_DIR=""
 OUTPUT_DIR=""
+SLAM_FPS=30   # effective FPS of the extracted frames
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --headless)
             HEADLESS_MODE="no_viewer"
             shift
+            ;;
+        --fps)
+            SLAM_FPS="$2"
+            shift 2
             ;;
         *)
             if [ -z "$DATASET_DIR" ]; then
@@ -37,7 +42,8 @@ done
 
 # Set default dataset if not provided
 if [ -z "$DATASET_DIR" ]; then
-    DATASET_DIR="/home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516"
+    echo "ERROR: dataset directory required as first positional argument"
+    exit 1
 fi
 
 # Set default output directory if not provided
@@ -81,7 +87,7 @@ ASSOCIATIONS_FILE="$DATASET_DIR/associations.txt"
 if [ ! -f "$ASSOCIATIONS_FILE" ]; then
     echo -e "${YELLOW}WARNING: associations.txt not found at $DATASET_DIR${NC}"
     echo "Generating associations file..."
-    python3 "$SCRIPT_DIR/create_associations.py" --dataset "$DATASET_DIR" --output "$ASSOCIATIONS_FILE"
+    python3 "$SCRIPT_DIR/create_associations.py" --dataset "$DATASET_DIR" --output "$ASSOCIATIONS_FILE" --fps "$SLAM_FPS"
 fi
 
 # Check ORB_SLAM3 executable
