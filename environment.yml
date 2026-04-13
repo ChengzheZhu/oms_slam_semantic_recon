@@ -1,0 +1,52 @@
+name: slam_recon
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+
+  # Scientific computing
+  - numpy<2.0       # Open3D requires numpy <2
+  - scipy
+  - scikit-learn
+  - scikit-image
+  - matplotlib
+  - pillow
+  - tqdm
+  - pyyaml
+  - pandas
+
+  - pip:
+      # PyTorch with CUDA 12.6
+      - torch==2.7.0
+      - torchvision==0.22.0
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+
+      # Open3D (headless — no GUI deps needed)
+      - open3d>=0.18.0
+
+      # RealSense frame extraction
+      - pyrealsense2
+
+      # OpenCV — pin <4.10 to stay compatible with numpy<2 (SAM3 requirement)
+      - opencv-python<4.10
+
+      # setuptools<71 required: >=72 drops pkg_resources as top-level module
+      - setuptools<71
+
+      # SAM3 core deps (see pyproject.toml)
+      - psutil
+      - timm>=1.0.17
+      - ftfy==6.1.1
+      - regex
+      - iopath>=0.1.10
+      - typing_extensions
+      - huggingface_hub
+      - einops
+
+      # SAM3 optional (used in pipeline scripts)
+      - pycocotools
+
+      # Utilities
+      - pybind11

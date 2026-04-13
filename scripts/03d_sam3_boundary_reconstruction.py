@@ -14,11 +14,9 @@ Pipeline:
 """
 
 import sys
+from collections import deque
 # Remove system Python paths to avoid conflicts
 sys.path = [p for p in sys.path if not p.startswith('/usr/local/lib/python3.12')]
-
-# Add SAM3 to path
-sys.path.insert(0, '/home/chengzhe/projects/sam3')
 
 import open3d as o3d
 import numpy as np
@@ -35,6 +33,34 @@ from sklearn.cluster import DBSCAN
 # SAM3 imports
 from sam3 import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
+
+
+def apply_depth_filter(depth_np, depth_scale, min_depth_m=0.15,
+                       confidence_np=None, confidence_threshold=0):
+    """
+    Zero out unreliable depth pixels before TSDF integration.
+
+    Always applied:
+      - Zero-depth pixels (hardware holes / no return)
+      - Pixels closer than min_depth_m (below D456 reliable stereo range)
+
+    Optional (requires confidence stream extracted by 00_extract_frames.py):
+      - confidence_threshold > 0: drop pixels where confidence < threshold
+        D456 confidence values: 0=none, 1=low, 2=high
+        Recommended: threshold=1 to drop only zero-confidence,
+                     threshold=2 to keep high-confidence only
+    """
+    min_depth_raw = int(min_depth_m * depth_scale)
+    invalid = (depth_np == 0) | (depth_np < min_depth_raw)
+
+    if confidence_np is not None and confidence_threshold > 0:
+        invalid |= (confidence_np < confidence_threshold)
+
+    if invalid.any():
+        depth_np = depth_np.copy()
+        depth_np[invalid] = 0
+
+    return depth_np
 
 
 def load_trajectory_log(log_file):
@@ -191,57 +217,44 @@ def segment_frame_with_sam3(image_path, processor, prompt="individual stone",
     return boundary_mask, num_segments
 
 
-def integrate_with_boundary_detection(frames_dir, intrinsic, poses, processor,
-                                      depth_scale=1000.0, depth_max=3.0, voxel_size=0.005,
-                                      frame_subsample=1, sam_prompt="individual stone",
-                                      sam_confidence=0.1, sam_max_size_ratio=0.15,
-                                      cache_dir=None):
+def integrate_tsdf(frames_dir, intrinsic, poses,
+                   depth_scale=1000.0, depth_max=3.0, voxel_size=0.005,
+                   depth_min_m=0.15, confidence_threshold=0):
     """
-    Integrate RGB-D frames with boundary detection.
-
-    Returns:
-        mesh: 3D mesh
-        boundary_points: Point cloud of boundary locations (for mesh segmentation)
+    Pass 1: pure TSDF integration over all frames. Returns the fused mesh.
+    SAM3 is not involved here — boundary detection happens in pass 2 after
+    the mesh is available.
     """
     color_files, depth_files = get_rgbd_file_lists(frames_dir)
     n_frames = min(len(color_files), len(depth_files), len(poses))
 
-    # Subsample frames
-    frame_indices = list(range(0, n_frames, frame_subsample))
-    print(f"\nDataset: {len(color_files)} color, {len(depth_files)} depth, {len(poses)} poses")
-    print(f"Using {len(frame_indices)} frames (subsample={frame_subsample})")
+    conf_dir = os.path.join(frames_dir, 'confidence')
+    use_confidence = (confidence_threshold > 0) and os.path.isdir(conf_dir)
+    if confidence_threshold > 0 and not use_confidence:
+        print(f"  ⚠ confidence_threshold={confidence_threshold} requested but no confidence/ dir found — skipping")
+    conf_files = (sorted([os.path.join(conf_dir, f) for f in os.listdir(conf_dir)
+                          if f.endswith('.png')]) if use_confidence else [])
 
-    # Create TSDF volume
+    print(f"\nTSDF pass: {n_frames} frames, voxel={voxel_size}m, depth=[{depth_min_m},{depth_max}]m")
+    print(f"Depth filter: confidence_threshold={confidence_threshold}"
+          f"{' (active)' if use_confidence else ' (no conf stream)'}")
+
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=voxel_size,
         sdf_trunc=voxel_size * 4.0,
         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
     )
 
-    print(f"\nTSDF: voxel={voxel_size}m, trunc={voxel_size*4.0}m, depth_max={depth_max}m")
-
-    # Accumulate boundary points across all frames
-    all_boundary_points = []
-    all_boundary_colors = []
-
-    print(f"\nProcessing {len(frame_indices)} frames...")
-
-    for idx in tqdm(frame_indices, desc="Integrating frames"):
-        # Segment frame with SAM3
-        cache_path = None
-        if cache_dir:
-            cache_path = os.path.join(cache_dir, f"frame_{idx:06d}.npy")
-
-        boundary_mask, num_segs = segment_frame_with_sam3(
-            color_files[idx], processor,
-            prompt=sam_prompt,
-            max_size_ratio=sam_max_size_ratio,
-            cache_path=cache_path
-        )
-
-        # Load RGB-D images
-        color = o3d.io.read_image(color_files[idx])
-        depth = o3d.io.read_image(depth_files[idx])
+    for i in tqdm(range(n_frames), desc="TSDF integration"):
+        color = o3d.io.read_image(color_files[i])
+        depth_np = np.asarray(o3d.io.read_image(depth_files[i]))
+        conf_np = (np.asarray(o3d.io.read_image(conf_files[i]))
+                   if use_confidence and i < len(conf_files) else None)
+        depth_np = apply_depth_filter(depth_np, depth_scale,
+                                      min_depth_m=depth_min_m,
+                                      confidence_np=conf_np,
+                                      confidence_threshold=confidence_threshold)
+        depth = o3d.geometry.Image(depth_np.astype(np.uint16))
 
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             color, depth,
@@ -249,75 +262,115 @@ def integrate_with_boundary_detection(frames_dir, intrinsic, poses, processor,
             depth_trunc=depth_max,
             convert_rgb_to_intensity=False
         )
+        volume.integrate(rgbd, intrinsic, np.linalg.inv(poses[i]))
 
-        # Get camera pose
-        extrinsic = np.linalg.inv(poses[idx])
-
-        # Integrate into TSDF (standard reconstruction)
-        volume.integrate(rgbd, intrinsic, extrinsic)
-
-        # Extract boundary points in 3D
-        if boundary_mask is not None and boundary_mask.any():
-            # Create point cloud from RGBD
-            pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-                rgbd, intrinsic, extrinsic
-            )
-
-            points = np.asarray(pcd.points)
-            colors = np.asarray(pcd.colors)
-
-            # Boundary mask is HxW, flatten to match point cloud
-            h, w = boundary_mask.shape
-            boundary_flat = boundary_mask.flatten()
-
-            # Filter to boundary points only
-            if len(boundary_flat) == len(points):
-                boundary_pts = points[boundary_flat]
-                boundary_cols = colors[boundary_flat]
-
-                if len(boundary_pts) > 0:
-                    all_boundary_points.append(boundary_pts)
-                    all_boundary_colors.append(boundary_cols)
-
-    print("✓ Integration complete")
-
-    # Extract mesh
-    print("\nExtracting mesh from TSDF...")
+    print("✓ TSDF integration complete")
+    print("\nExtracting mesh...")
     mesh = volume.extract_triangle_mesh()
     mesh.compute_vertex_normals()
     print(f"  Vertices: {len(mesh.vertices):,}, Triangles: {len(mesh.triangles):,}")
-
-    # Combine all boundary points
-    if all_boundary_points:
-        boundary_points = np.vstack(all_boundary_points)
-        boundary_colors = np.vstack(all_boundary_colors)
-
-        boundary_pcd = o3d.geometry.PointCloud()
-        boundary_pcd.points = o3d.utility.Vector3dVector(boundary_points)
-        boundary_pcd.colors = o3d.utility.Vector3dVector(boundary_colors)
-
-        print(f"  Boundary points: {len(boundary_points):,}")
-    else:
-        boundary_pcd = o3d.geometry.PointCloud()
-        print("  ⚠ No boundary points detected")
-
-    return mesh, boundary_pcd
+    return mesh
 
 
-def segment_mesh_with_boundaries(mesh, boundary_pcd, boundary_distance_threshold=0.01,
-                                 min_cluster_size=500):
+def compute_vertex_boundary_votes(mesh, frames_dir, poses, intrinsic, processor,
+                                   frame_subsample=1, sam_prompt="individual stone",
+                                   sam_max_size_ratio=0.15,
+                                   boundary_vote_ratio=0.3,
+                                   cache_dir=None):
     """
-    Segment mesh using boundary constraints.
+    Pass 2: project mesh vertices back into SAM3 frames and vote on seams.
 
-    Strategy:
-    1. For each mesh vertex, check if it's near a boundary point
-    2. Use region growing / clustering that respects boundaries
-    3. Extract connected components as separate segments
+    For each subsampled frame:
+      - Run SAM3 → boundary mask (True where adjacent mask IDs differ)
+      - Project all mesh vertices into this camera (vectorised)
+      - stone_votes[v]++  for every visible vertex
+      - boundary_votes[v]++ if that pixel is a seam pixel
+
+    A vertex is classified as a seam if:
+        boundary_votes[v] / stone_votes[v] > boundary_vote_ratio
+
+    No cross-frame ID tracking is needed: the seam signal is purely local
+    (two adjacent pixels in the same frame having different mask IDs).
+
+    Returns:
+        is_boundary: bool array [N_vertices]
+    """
+    color_files, _ = get_rgbd_file_lists(frames_dir)
+    n_frames = min(len(color_files), len(poses))
+    frame_indices = list(range(0, n_frames, frame_subsample))
+
+    vertices = np.asarray(mesh.vertices)  # [N, 3]
+    N = len(vertices)
+    verts_h = np.hstack([vertices, np.ones((N, 1))])  # [N, 4]
+
+    stone_votes    = np.zeros(N, dtype=np.int32)
+    boundary_votes = np.zeros(N, dtype=np.int32)
+
+    fx, fy = intrinsic.get_focal_length()
+    cx, cy = intrinsic.get_principal_point()
+    W, H   = intrinsic.width, intrinsic.height
+
+    print(f"\nBoundary voting pass: {len(frame_indices)} frames "
+          f"(subsample={frame_subsample}), ratio_threshold={boundary_vote_ratio}")
+
+    for idx in tqdm(frame_indices, desc="Boundary voting"):
+        cache_path = (os.path.join(cache_dir, f"frame_{idx:06d}.npy")
+                      if cache_dir else None)
+
+        boundary_mask, _ = segment_frame_with_sam3(
+            color_files[idx], processor,
+            prompt=sam_prompt,
+            max_size_ratio=sam_max_size_ratio,
+            cache_path=cache_path
+        )
+
+        if boundary_mask is None:
+            continue
+
+        # Project vertices into this camera frame (vectorised)
+        extrinsic = np.linalg.inv(poses[idx])        # world → camera
+        verts_cam = (extrinsic @ verts_h.T).T        # [N, 4]
+        z = verts_cam[:, 2]
+
+        valid_z = z > 0.1
+        x_v = verts_cam[valid_z, 0]
+        y_v = verts_cam[valid_z, 1]
+        z_v = z[valid_z]
+        vidx = np.where(valid_z)[0]
+
+        u = (fx * x_v / z_v + cx).astype(int)
+        v = (fy * y_v / z_v + cy).astype(int)
+
+        in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        vidx   = vidx[in_bounds]
+        u_ok   = u[in_bounds]
+        v_ok   = v[in_bounds]
+
+        stone_votes[vidx] += 1
+
+        is_bnd = boundary_mask[v_ok, u_ok]
+        boundary_votes[vidx[is_bnd]] += 1
+
+    ratio = boundary_votes / np.maximum(stone_votes, 1)
+    is_boundary = ratio > boundary_vote_ratio
+
+    n_seam = is_boundary.sum()
+    print(f"✓ Voting complete: {n_seam:,} / {N:,} vertices classified as seam "
+          f"({100*n_seam/N:.1f}%)")
+    return is_boundary
+
+
+def segment_mesh_with_boundaries(mesh, is_boundary, min_cluster_size=500):
+    """
+    Segment mesh using a pre-computed per-vertex boundary label.
+
+    is_boundary[v] == True means vertex v sits on a stone seam and acts as
+    a barrier in the BFS — edges that touch a boundary vertex are not
+    traversed, so each connected stone interior becomes its own segment.
 
     Args:
         mesh: Triangle mesh to segment
-        boundary_pcd: Point cloud marking boundary locations
-        boundary_distance_threshold: Distance to boundary to consider "on boundary"
+        is_boundary: bool array [N_vertices] from compute_vertex_boundary_votes()
         min_cluster_size: Minimum triangles per segment
 
     Returns:
@@ -325,26 +378,15 @@ def segment_mesh_with_boundaries(mesh, boundary_pcd, boundary_distance_threshold
     """
     print("\nSegmenting mesh using boundary constraints...")
 
-    vertices = np.asarray(mesh.vertices)
+    vertices  = np.asarray(mesh.vertices)
     triangles = np.asarray(mesh.triangles)
 
-    # Build KD-tree for boundary points
-    if len(boundary_pcd.points) == 0:
-        print("  ⚠ No boundaries - returning full mesh as single segment")
+    if not is_boundary.any():
+        print("  ⚠ No boundary vertices — returning full mesh as single segment")
         return [(1, mesh)]
 
-    boundary_tree = o3d.geometry.KDTreeFlann(boundary_pcd)
-
-    # Mark vertices as boundary or interior
-    print("  Classifying vertices...")
-    is_boundary = np.zeros(len(vertices), dtype=bool)
-
-    for i, v in enumerate(vertices):
-        [k, idx, dist] = boundary_tree.search_radius_vector_3d(v, boundary_distance_threshold)
-        if k > 0:  # Close to boundary
-            is_boundary[i] = True
-
-    print(f"  Boundary vertices: {is_boundary.sum():,} / {len(vertices):,} ({100*is_boundary.sum()/len(vertices):.1f}%)")
+    print(f"  Boundary vertices: {is_boundary.sum():,} / {len(vertices):,} "
+          f"({100*is_boundary.sum()/len(vertices):.1f}%)")
 
     # Build adjacency graph (edges that DON'T cross boundaries)
     print("  Building adjacency graph...")
@@ -377,11 +419,11 @@ def segment_mesh_with_boundaries(mesh, boundary_pcd, boundary_distance_threshold
             continue
 
         # BFS from this vertex
-        queue = [start_v]
+        queue = deque([start_v])
         vertex_labels[start_v] = current_label
 
         while queue:
-            v = queue.pop(0)
+            v = queue.popleft()
             for neighbor in adjacency[v]:
                 if vertex_labels[neighbor] < 0:  # Unlabeled
                     vertex_labels[neighbor] = current_label
@@ -449,11 +491,20 @@ def main():
     parser.add_argument('--depth_max', type=float, default=3.0,
                        help='Max depth (meters)')
     parser.add_argument('--frame_subsample', type=int, default=1,
-                       help='Process every Nth frame')
+                       help='SAM3 boundary voting runs on every Nth frame; TSDF uses all frames')
+
+    # Depth quality filter
+    parser.add_argument('--depth_min', type=float, default=0.15,
+                       help='Minimum valid depth in metres (default: 0.15)')
+    parser.add_argument('--confidence_threshold', type=int, default=0,
+                       help='Confidence filter threshold (default: 0 = disabled). '
+                            'Requires confidence/ frames from 00_extract_frames.py. '
+                            'D456 values: 1=drop zero-confidence, 2=keep high-confidence only.')
 
     # Segmentation parameters
-    parser.add_argument('--boundary_threshold', type=float, default=0.01,
-                       help='Distance threshold for boundary detection (meters)')
+    parser.add_argument('--boundary_vote_ratio', type=float, default=0.3,
+                       help='Fraction of observations that must be a seam pixel for a vertex '
+                            'to be classified as boundary (default: 0.3)')
     parser.add_argument('--min_cluster_size', type=int, default=500,
                        help='Minimum triangles per segment')
 
@@ -462,9 +513,6 @@ def main():
     print("="*80)
     print("SAM3 Boundary-Based Segmented Reconstruction")
     print("="*80)
-
-    # Initialize SAM3
-    processor = initialize_sam3(args.sam_confidence)
 
     # Load camera data
     print(f"\nLoading intrinsic: {args.intrinsic}")
@@ -475,21 +523,18 @@ def main():
     poses = load_trajectory_log(args.trajectory)
     print(f"✓ Loaded {len(poses)} poses")
 
-    # Setup cache directory
+    os.makedirs(args.segments_dir, exist_ok=True)
     cache_dir = os.path.join(args.segments_dir, 'boundary_masks')
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Integrate with boundary detection
-    mesh, boundary_pcd = integrate_with_boundary_detection(
-        args.frames_dir, intrinsic, poses, processor,
+    # Pass 1: TSDF fusion (all frames, no SAM3)
+    mesh = integrate_tsdf(
+        args.frames_dir, intrinsic, poses,
         depth_scale=depth_scale,
         depth_max=args.depth_max,
         voxel_size=args.voxel_size,
-        frame_subsample=args.frame_subsample,
-        sam_prompt=args.sam_prompt,
-        sam_confidence=args.sam_confidence,
-        sam_max_size_ratio=args.sam_max_size_ratio,
-        cache_dir=cache_dir
+        depth_min_m=args.depth_min,
+        confidence_threshold=args.confidence_threshold,
     )
 
     # Save full mesh
@@ -498,22 +543,33 @@ def main():
     o3d.io.write_triangle_mesh(args.output, mesh)
     print(f"✓ Saved ({os.path.getsize(args.output)/(1024**2):.1f} MB)")
 
-    # Save boundary point cloud for debugging
+    # Pass 2: SAM3 boundary voting (subsampled frames)
+    processor = initialize_sam3(args.sam_confidence)
+
+    is_boundary = compute_vertex_boundary_votes(
+        mesh, args.frames_dir, poses, intrinsic, processor,
+        frame_subsample=args.frame_subsample,
+        sam_prompt=args.sam_prompt,
+        sam_max_size_ratio=args.sam_max_size_ratio,
+        boundary_vote_ratio=args.boundary_vote_ratio,
+        cache_dir=cache_dir,
+    )
+
+    # Save boundary vertices as point cloud for inspection
+    boundary_pts = np.asarray(mesh.vertices)[is_boundary]
+    boundary_pcd = o3d.geometry.PointCloud()
+    boundary_pcd.points = o3d.utility.Vector3dVector(boundary_pts)
     boundary_path = args.output.replace('.ply', '_boundaries.ply')
     o3d.io.write_point_cloud(boundary_path, boundary_pcd)
-    print(f"✓ Boundary points: {boundary_path}")
+    print(f"✓ Boundary vertices saved: {boundary_path}")
 
-    # Segment mesh using boundaries
+    # Segment mesh using boundary vertex labels
     segment_meshes = segment_mesh_with_boundaries(
-        mesh, boundary_pcd,
-        boundary_distance_threshold=args.boundary_threshold,
+        mesh, is_boundary,
         min_cluster_size=args.min_cluster_size
     )
 
-    # Save individual segments
-    os.makedirs(args.segments_dir, exist_ok=True)
     print(f"\nSaving {len(segment_meshes)} segments to {args.segments_dir}/")
-
     for seg_id, submesh in segment_meshes:
         seg_path = os.path.join(args.segments_dir, f"segment_{seg_id:03d}.ply")
         o3d.io.write_triangle_mesh(seg_path, submesh)
@@ -524,9 +580,9 @@ def main():
     print("Reconstruction Complete!")
     print("="*80)
     print(f"\nOutputs:")
-    print(f"  Full mesh: {args.output}")
+    print(f"  Full mesh:  {args.output}")
     print(f"  Boundaries: {boundary_path}")
-    print(f"  Segments: {args.segments_dir}/segment_*.ply")
+    print(f"  Segments:   {args.segments_dir}/segment_*.ply")
 
 
 if __name__ == "__main__":

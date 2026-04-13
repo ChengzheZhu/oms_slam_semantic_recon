@@ -18,10 +18,8 @@ sudo apt-get install -y \
 # Install Eigen3
 sudo apt-get install -y libeigen3-dev
 
-# Install RealSense
-sudo apt-get install -y \
-    librealsense2-dev \
-    librealsense2-utils
+# RealSense SDK: installed via pip (pyrealsense2), not needed for building ORB-SLAM3
+# librealsense2-dev / librealsense2-utils skipped
 
 # Install GTK for OpenCV
 sudo apt-get install -y \

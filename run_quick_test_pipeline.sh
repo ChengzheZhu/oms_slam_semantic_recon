@@ -11,14 +11,18 @@
 set -e
 
 # ── config ────────────────────────────────────────────────────────────────────
-CONDA_ENV="sam3_open3d"
+CONDA_ENV="slam_recon"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAM3_PATH="$HOME/projects/sam3"
+SAM3_PATH="$PROJECT_DIR/external/sam3"
 
-# Input — set here or pass as first argument
+# Input — positional args or env vars
+#   $1  path to .bag file
+#   $2  (optional) pre-extracted frames dir — skips step 0 if valid
 BAG_FILE="${1:-${BAG_FILE:-}}"
+FRAMES_DIR_OVERRIDE="${2:-${FRAMES_DIR_OVERRIDE:-}}"
+
 if [ -z "$BAG_FILE" ]; then
-    echo "Usage: $0 /path/to/recording.bag"
+    echo "Usage: $0 /path/to/recording.bag [/path/to/existing/frames_dir]"
     exit 1
 fi
 
@@ -31,13 +35,18 @@ VOXEL_SIZE=0.01         # coarser voxel for faster test
 SAM3_PROMPT="individual stone"
 SAM3_CONFIDENCE=0.1
 SAM3_MAX_SIZE_RATIO=0.15
-BOUNDARY_THRESHOLD=0.01
+BOUNDARY_VOTE_RATIO=0.3
 MIN_CLUSTER_SIZE=200
-USE_VIEWER=true         # set false for headless/server runs
+USE_VIEWER=false        # headless — binary compiled without viewer
 
-# Derived paths
-DATASET_NAME="$(basename "${BAG_FILE%.bag}")_test_$(date +%Y%m%d_%H%M%S)"
-FRAMES_DIR="$(dirname "$BAG_FILE")/${DATASET_NAME}"
+# Derived paths — use override frames dir if supplied
+if [ -n "$FRAMES_DIR_OVERRIDE" ]; then
+    FRAMES_DIR="$(realpath "$FRAMES_DIR_OVERRIDE")"
+    DATASET_NAME="$(basename "$FRAMES_DIR")"
+else
+    DATASET_NAME="$(basename "${BAG_FILE%.bag}")_test_$(date +%Y%m%d_%H%M%S)"
+    FRAMES_DIR="$(dirname "$BAG_FILE")/${DATASET_NAME}"
+fi
 OUTPUT_DIR="${PROJECT_DIR}/output/${DATASET_NAME}"
 
 # Log file (timestamped, kept in output dir)
@@ -63,13 +72,21 @@ echo " env     : $CONDA_ENV"
 echo " stride  : $FRAME_STRIDE  subsample: $FRAME_SUBSAMPLE"
 echo "════════════════════════════════════════"
 
-# Step 0: Extract frames
+# Step 0: Extract frames (skip if valid extraction already exists)
 echo ""
-echo "[0/3] Extracting frames (stride=$FRAME_STRIDE) …"
-python -u "$PROJECT_DIR/scripts/00_extract_frames.py" \
-    --bag    "$BAG_FILE"   \
-    --output "$FRAMES_DIR" \
-    --stride "$FRAME_STRIDE"
+_frames_ok() {
+    [ -d "$1/color" ] && [ "$(ls -A "$1/color" 2>/dev/null)" ] && [ -f "$1/intrinsic.json" ]
+}
+if _frames_ok "$FRAMES_DIR"; then
+    _n=$(ls "$FRAMES_DIR/color" | wc -l)
+    echo "[0/3] Skipping extraction — $FRAMES_DIR already has $_n colour frames"
+else
+    echo "[0/3] Extracting frames (stride=$FRAME_STRIDE) …"
+    python -u "$PROJECT_DIR/scripts/00_extract_frames.py" \
+        --bag    "$BAG_FILE"   \
+        --output "$FRAMES_DIR" \
+        --stride "$FRAME_STRIDE"
+fi
 
 # Step 1: ORB-SLAM3 tracking
 echo ""
@@ -86,8 +103,9 @@ cp "$PROJECT_DIR/external/orbslam3/KeyFrameTrajectory.txt"  "$OUTPUT_DIR/sparse/
 echo ""
 echo "[2/3] Converting trajectory to Open3D format …"
 python -u "$PROJECT_DIR/scripts/02_convert_trajectory.py" \
-    --input  "$OUTPUT_DIR/sparse/CameraTrajectory.txt"    \
-    --output "$OUTPUT_DIR/sparse/trajectory_open3d.log"
+    --input      "$OUTPUT_DIR/sparse/CameraTrajectory.txt"        \
+    --output_log "$OUTPUT_DIR/sparse/trajectory_open3d.log"       \
+    --output_json "$OUTPUT_DIR/sparse/trajectory_pose_graph.json"
 
 # Step 3: SAM3 boundary reconstruction
 echo ""
@@ -103,7 +121,7 @@ python -u "$PROJECT_DIR/scripts/03d_sam3_boundary_reconstruction.py" \
     --sam_max_size_ratio "$SAM3_MAX_SIZE_RATIO"                    \
     --frame_subsample   "$FRAME_SUBSAMPLE"                         \
     --voxel_size        "$VOXEL_SIZE"                              \
-    --boundary_threshold "$BOUNDARY_THRESHOLD"                     \
+    --boundary_vote_ratio "$BOUNDARY_VOTE_RATIO"                   \
     --min_cluster_size  "$MIN_CLUSTER_SIZE"
 
 echo ""

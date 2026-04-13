@@ -17,6 +17,33 @@ from pathlib import Path
 import os
 
 
+def apply_depth_filter(depth_np, depth_scale, min_depth_m=0.15,
+                       confidence_np=None, confidence_threshold=0):
+    """
+    Zero out unreliable depth pixels before TSDF integration.
+
+    Always applied:
+      - Zero-depth pixels (hardware holes / no return)
+      - Pixels closer than min_depth_m (below D456 reliable stereo range)
+
+    Optional (requires confidence/ frames from 00_extract_frames.py):
+      - confidence_threshold > 0: drop pixels where confidence < threshold
+        D456 values: 0=none, 1=low, 2=high
+        Recommended: 1 to drop zero-confidence, 2 for high-confidence only
+    """
+    min_depth_raw = int(min_depth_m * depth_scale)
+    invalid = (depth_np == 0) | (depth_np < min_depth_raw)
+
+    if confidence_np is not None and confidence_threshold > 0:
+        invalid |= (confidence_np < confidence_threshold)
+
+    if invalid.any():
+        depth_np = depth_np.copy()
+        depth_np[invalid] = 0
+
+    return depth_np
+
+
 def load_trajectory_log(log_file):
     """Load Open3D trajectory log format."""
     poses = []
@@ -68,7 +95,8 @@ def get_rgbd_file_lists(frames_dir):
 
 
 def integrate_rgbd_frames(frames_dir, intrinsic, poses, depth_scale=1000.0,
-                         depth_max=3.0, voxel_size=0.02):
+                         depth_max=3.0, voxel_size=0.02,
+                         depth_min_m=0.15, confidence_threshold=0):
     """
     Integrate RGB-D frames into TSDF volume using ORB_SLAM3 poses.
 
@@ -92,6 +120,16 @@ def integrate_rgbd_frames(frames_dir, intrinsic, poses, depth_scale=1000.0,
     n_frames = min(len(color_files), len(depth_files), len(poses))
     print(f"  Using {n_frames} frames for integration")
 
+    # Confidence stream: auto-detect from extraction output
+    conf_dir = os.path.join(frames_dir, 'confidence')
+    use_confidence = (confidence_threshold > 0) and os.path.isdir(conf_dir)
+    if confidence_threshold > 0 and not use_confidence:
+        print(f"  ⚠ confidence_threshold={confidence_threshold} requested but no confidence/ dir found")
+    conf_files = (sorted([os.path.join(conf_dir, f) for f in os.listdir(conf_dir)
+                          if f.endswith('.png')]) if use_confidence else [])
+    print(f"  Depth filter: min={depth_min_m}m, confidence_threshold={confidence_threshold}"
+          f"{' (active)' if use_confidence else ' (no conf stream)'}")
+
     # Create TSDF volume
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=voxel_size,
@@ -112,9 +150,16 @@ def integrate_rgbd_frames(frames_dir, intrinsic, poses, depth_scale=1000.0,
         if (i + 1) % 50 == 0 or i == 0:
             print(f"  Frame {i+1}/{n_frames} ({100*(i+1)/n_frames:.1f}%)")
 
-        # Load RGB-D images
+        # Load RGB-D images and apply depth quality filter
         color = o3d.io.read_image(color_files[i])
-        depth = o3d.io.read_image(depth_files[i])
+        depth_np = np.asarray(o3d.io.read_image(depth_files[i]))
+        conf_np = (np.asarray(o3d.io.read_image(conf_files[i]))
+                   if use_confidence and i < len(conf_files) else None)
+        depth_np = apply_depth_filter(depth_np, depth_scale,
+                                      min_depth_m=depth_min_m,
+                                      confidence_np=conf_np,
+                                      confidence_threshold=confidence_threshold)
+        depth = o3d.geometry.Image(depth_np.astype(np.uint16))
 
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             color, depth,
@@ -152,6 +197,12 @@ def main():
                        help='TSDF voxel size in meters')
     parser.add_argument('--depth_max', type=float, default=3.0,
                        help='Maximum depth in meters')
+    parser.add_argument('--depth_min', type=float, default=0.15,
+                       help='Minimum valid depth in metres (default: 0.15)')
+    parser.add_argument('--confidence_threshold', type=int, default=0,
+                       help='Confidence filter threshold (default: 0 = disabled). '
+                            'Requires confidence/ frames from 00_extract_frames.py. '
+                            'D456 values: 1=drop zero-confidence, 2=keep high-confidence only.')
 
     args = parser.parse_args()
 
@@ -178,7 +229,9 @@ def main():
         poses,
         depth_scale=depth_scale,
         depth_max=args.depth_max,
-        voxel_size=args.voxel_size
+        voxel_size=args.voxel_size,
+        depth_min_m=args.depth_min,
+        confidence_threshold=args.confidence_threshold,
     )
 
     # Extract mesh

@@ -1,3 +1,6 @@
 [submodule "external/orbslam3"]
 	path = external/orbslam3
 	url = https://github.com/ChengzheZhu/ORB_SLAM3.git
+[submodule "external/sam3"]
+	path = external/sam3
+	url = https://github.com/ChengzheZhu/sam3.git

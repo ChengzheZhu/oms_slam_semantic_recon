@@ -7,6 +7,8 @@ echo "Installing Pangolin..."
 sudo apt-get update
 sudo apt-get install -y \
     libglew-dev \
+    libepoxy-dev \
+    python3-dev \
     libboost-dev \
     libboost-thread-dev \
     libboost-filesystem-dev \
@@ -29,7 +31,7 @@ cd "$PANGOLIN_DIR"
 
 # Build and install
 mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_PANGOLIN_PYTHON=OFF
 make -j$(nproc)
 sudo make install
 

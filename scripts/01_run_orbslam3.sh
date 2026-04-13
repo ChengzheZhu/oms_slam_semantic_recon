@@ -115,24 +115,20 @@ cd "$ORB_SLAM3_DIR"
 # Set library path for Pangolin
 export LD_LIBRARY_PATH=$ORB_SLAM3_DIR/lib:/usr/local/lib:$LD_LIBRARY_PATH
 
-# Run with or without viewer
-if [ -n "$HEADLESS_MODE" ]; then
-    echo "Running in headless mode (no visualization)"
-    # Set environment variable to disable Pangolin viewer
-    export DISPLAY=""
-    ./Examples/RGB-D/rgbd_tum \
-        "$VOCAB_FILE" \
-        "$CONFIG_FILE" \
-        "$DATASET_DIR" \
-        "$ASSOCIATIONS_FILE" || echo "Note: ORB_SLAM3 may crash during cleanup (this is normal)"
-else
+# Run — pass viewer flag as 5th argument (0=headless, 1=viewer)
+VIEWER_FLAG=0
+if [ -z "$HEADLESS_MODE" ]; then
     echo "Running with visualization enabled"
-    ./Examples/RGB-D/rgbd_tum \
-        "$VOCAB_FILE" \
-        "$CONFIG_FILE" \
-        "$DATASET_DIR" \
-        "$ASSOCIATIONS_FILE" || echo "Note: ORB_SLAM3 may crash during cleanup (this is normal)"
+    VIEWER_FLAG=1
+else
+    echo "Running in headless mode (no visualization)"
 fi
+./Examples/RGB-D/rgbd_tum \
+    "$VOCAB_FILE" \
+    "$CONFIG_FILE" \
+    "$DATASET_DIR" \
+    "$ASSOCIATIONS_FILE" \
+    "$VIEWER_FLAG" || echo "Note: ORB_SLAM3 may crash during cleanup (this is normal)"
 
 # Check if trajectory files were generated (what matters)
 if [ ! -f "CameraTrajectory.txt" ]; then

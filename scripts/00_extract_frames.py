@@ -18,7 +18,8 @@ import argparse
 from pathlib import Path
 
 
-def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
+def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0,
+                            skip_confidence=False):
     """
     Extract RGB-D frames from RealSense bag file.
 
@@ -27,6 +28,7 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
         output_dir: Directory to save extracted frames
         frame_stride: Extract every Nth frame (1 = all frames)
         max_frames: Maximum number of frames to extract (0 = all)
+        skip_confidence: Skip confidence stream even if present in bag
     """
     # Create output directories
     color_dir = os.path.join(output_dir, 'color')
@@ -48,7 +50,7 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
     playback = device.as_playback()
     playback.set_real_time(False)  # Process as fast as possible
 
-    # Get camera intrinsics
+    # Probe for confidence stream on first frameset
     frames = pipeline.wait_for_frames()
     color_frame = frames.get_color_frame()
     depth_frame = frames.get_depth_frame()
@@ -57,6 +59,14 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
         print("ERROR: Could not get initial frames")
         pipeline.stop()
         return
+
+    has_confidence = (not skip_confidence) and bool(frames.first_or_default(rs.stream.confidence))
+    conf_dir = os.path.join(output_dir, 'confidence')
+    if has_confidence:
+        os.makedirs(conf_dir, exist_ok=True)
+        print(f"  Confidence stream: FOUND — extracting to confidence/")
+    else:
+        print(f"  Confidence stream: not present{' (skipped)' if skip_confidence else ''}")
 
     # Get intrinsics
     color_intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
@@ -128,6 +138,13 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
             cv2.imwrite(color_filename, cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR))
             cv2.imwrite(depth_filename, depth_image)
 
+            # Save confidence frame if available
+            if has_confidence:
+                conf_frame = frames.first_or_default(rs.stream.confidence)
+                if conf_frame:
+                    conf_image = np.asanyarray(conf_frame.get_data())
+                    cv2.imwrite(os.path.join(conf_dir, f'{saved_count:06d}.png'), conf_image)
+
             saved_count += 1
             frame_count += 1
 
@@ -142,7 +159,17 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0):
     print(f"\n✓ Extraction complete!")
     print(f"  Total frames processed: {frame_count}")
     print(f"  Frames saved: {saved_count}")
+    print(f"  Confidence stream: {'extracted' if has_confidence else 'not available'}")
     print(f"  Output: {output_dir}")
+
+    # Write stream availability so downstream scripts can auto-detect
+    streams_info = {
+        "has_confidence": has_confidence,
+        "frame_count": saved_count,
+        "frame_stride": frame_stride,
+    }
+    with open(os.path.join(output_dir, 'streams.json'), 'w') as f:
+        json.dump(streams_info, f, indent=2)
 
     return saved_count
 
@@ -157,6 +184,8 @@ def main():
                        help='Extract every Nth frame (default: 1 = all frames)')
     parser.add_argument('--max_frames', type=int, default=0,
                        help='Maximum number of frames to extract (0 = all)')
+    parser.add_argument('--skip_confidence', action='store_true',
+                       help='Skip confidence stream even if present in bag')
 
     args = parser.parse_args()
 
@@ -168,7 +197,8 @@ def main():
         print(f"ERROR: Bag file not found: {args.bag}")
         return 1
 
-    extract_frames_from_bag(args.bag, args.output, args.stride, args.max_frames)
+    extract_frames_from_bag(args.bag, args.output, args.stride, args.max_frames,
+                            skip_confidence=args.skip_confidence)
 
     print("\n" + "="*80)
     print("Next step: Run ORB_SLAM3 pipeline")
