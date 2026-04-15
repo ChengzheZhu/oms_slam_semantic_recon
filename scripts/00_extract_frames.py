@@ -99,6 +99,7 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0,
     # Extract frames
     frame_count = 0
     saved_count = 0
+    timestamps = []
 
     print(f"\nExtracting frames (stride={frame_stride})...")
 
@@ -131,6 +132,9 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0,
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
 
+            # Capture real bag timestamp (ms → seconds) before saving
+            frame_timestamp_sec = frames.get_timestamp() / 1000.0
+
             # Save frames
             color_filename = os.path.join(color_dir, f'{saved_count:06d}.jpg')
             depth_filename = os.path.join(depth_dir, f'{saved_count:06d}.png')
@@ -145,6 +149,7 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0,
                     conf_image = np.asanyarray(conf_frame.get_data())
                     cv2.imwrite(os.path.join(conf_dir, f'{saved_count:06d}.png'), conf_image)
 
+            timestamps.append(frame_timestamp_sec)
             saved_count += 1
             frame_count += 1
 
@@ -156,10 +161,17 @@ def extract_frames_from_bag(bag_file, output_dir, frame_stride=1, max_frames=0,
     finally:
         pipeline.stop()
 
+    # Write real bag timestamps so create_associations.py uses actual timing
+    timestamps_file = os.path.join(output_dir, 'timestamps.txt')
+    with open(timestamps_file, 'w') as f:
+        for ts in timestamps:
+            f.write(f"{ts:.6f}\n")
+
     print(f"\n✓ Extraction complete!")
     print(f"  Total frames processed: {frame_count}")
     print(f"  Frames saved: {saved_count}")
     print(f"  Confidence stream: {'extracted' if has_confidence else 'not available'}")
+    print(f"  Timestamps: {timestamps_file}")
     print(f"  Output: {output_dir}")
 
     # Write stream availability so downstream scripts can auto-detect

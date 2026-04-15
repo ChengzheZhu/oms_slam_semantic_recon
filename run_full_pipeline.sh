@@ -35,7 +35,9 @@ VOXEL_SIZE=0.005        # TSDF voxel size in metres
 SAM3_PROMPT="individual stone"
 SAM3_CONFIDENCE=0.1
 SAM3_MAX_SIZE_RATIO=0.15
-BOUNDARY_VOTE_RATIO=0.3   # fraction of frame-observations that must be seam pixels
+ALPHA_THRESHOLD=0.1       # alpha score below which a vertex is seam/background
+BOUNDARY_PROPAGATION_HOPS=0  # BFS hops to fatten seam network (0 = disabled)
+MESH_KEEP_COMPONENTS=8    # drop all but the N largest TSDF components before segmentation
 MIN_CLUSTER_SIZE=500
 USE_VIEWER=false        # headless — binary compiled without viewer
 
@@ -54,6 +56,11 @@ mkdir -p "$OUTPUT_DIR"
 LOG="$OUTPUT_DIR/run_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
 echo "Log: $LOG"
+
+# Save config so run_meshing_with_segmentation.sh can recover FRAMES_DIR
+cat > "$OUTPUT_DIR/config.env" <<EOF
+FRAMES_DIR="$FRAMES_DIR"
+EOF
 
 # ── conda ─────────────────────────────────────────────────────────────────────
 source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
@@ -78,18 +85,26 @@ _frames_ok() {
 }
 if _frames_ok "$FRAMES_DIR"; then
     _n=$(ls "$FRAMES_DIR/color" | wc -l)
-    echo "[0/4] Skipping extraction — $FRAMES_DIR already has $_n colour frames"
+    echo "[0/5] Skipping extraction — $FRAMES_DIR already has $_n colour frames"
 else
-    echo "[0/4] Extracting frames (stride=$FRAME_STRIDE) …"
+    echo "[0/5] Extracting frames (stride=$FRAME_STRIDE) …"
     python -u "$PROJECT_DIR/scripts/00_extract_frames.py" \
         --bag    "$BAG_FILE"   \
         --output "$FRAMES_DIR" \
         --stride "$FRAME_STRIDE"
 fi
 
-# Step 1: ORB-SLAM3 tracking
+# Step 1: SAM3 alpha cache (resumable — skips already-cached frames)
 echo ""
-echo "[1/3] Running ORB-SLAM3 …"
+echo "[1/5] Generating SAM3 alpha cache …"
+python -u "$PROJECT_DIR/scripts/01b_run_sam3_alpha.py" \
+    --frames_dir     "$FRAMES_DIR"      \
+    --sam_prompt     "$SAM3_PROMPT"     \
+    --sam_confidence "$SAM3_CONFIDENCE"
+
+# Step 2: ORB-SLAM3 tracking
+echo ""
+echo "[2/5] Running ORB-SLAM3 …"
 VIEWER_ARG=""
 [ "$USE_VIEWER" = "false" ] && VIEWER_ARG="--headless"
 bash "$PROJECT_DIR/scripts/01_run_orbslam3.sh" "$FRAMES_DIR" "$OUTPUT_DIR/sparse" --fps "$SLAM_FPS" $VIEWER_ARG
@@ -98,43 +113,45 @@ mkdir -p "$OUTPUT_DIR/sparse"
 cp "$PROJECT_DIR/external/orbslam3/CameraTrajectory.txt"  "$OUTPUT_DIR/sparse/"
 cp "$PROJECT_DIR/external/orbslam3/KeyFrameTrajectory.txt" "$OUTPUT_DIR/sparse/"
 
-# Step 2: Convert trajectory
+# Step 3: Convert trajectory
 echo ""
-echo "[2/3] Converting trajectory to Open3D format …"
+echo "[3/5] Converting trajectory to Open3D format …"
 python -u "$PROJECT_DIR/scripts/02_convert_trajectory.py" \
     --input      "$OUTPUT_DIR/sparse/CameraTrajectory.txt"        \
     --output_log "$OUTPUT_DIR/sparse/trajectory_open3d.log"       \
     --output_json "$OUTPUT_DIR/sparse/trajectory_pose_graph.json"
 
-# Step 3: SAM3 boundary reconstruction
+# Step 4: TSDF meshing + segmentation (SAM3 reads from cache)
 echo ""
-echo "[3/3] SAM3 boundary reconstruction (subsample=$FRAME_SUBSAMPLE) …"
+echo "[4/5] TSDF meshing + segmentation …"
 python -u "$PROJECT_DIR/scripts/03d_sam3_boundary_reconstruction.py" \
     --frames_dir        "$FRAMES_DIR"                              \
     --intrinsic         "$FRAMES_DIR/intrinsic.json"              \
     --trajectory        "$OUTPUT_DIR/sparse/trajectory_open3d.log" \
-    --output            "$OUTPUT_DIR/sam3_boundary_mesh.ply"       \
+    --output            "$OUTPUT_DIR/raw_mesh_rgb.ply"       \
     --segments_dir      "$OUTPUT_DIR/sam3_segments"                \
     --sam_prompt        "$SAM3_PROMPT"                             \
     --sam_confidence    "$SAM3_CONFIDENCE"                         \
     --sam_max_size_ratio "$SAM3_MAX_SIZE_RATIO"                    \
     --frame_subsample   "$FRAME_SUBSAMPLE"                         \
     --voxel_size        "$VOXEL_SIZE"                              \
-    --boundary_vote_ratio "$BOUNDARY_VOTE_RATIO"                   \
+    --alpha_threshold "$ALPHA_THRESHOLD"                           \
+    --boundary_propagation_hops "$BOUNDARY_PROPAGATION_HOPS"       \
+    --mesh_keep_components "$MESH_KEEP_COMPONENTS"                 \
     --min_cluster_size  "$MIN_CLUSTER_SIZE"
 
-# Step 4: Debug GLB — mesh + camera trajectory for geometry inspection
+# Step 5: Debug GLB
 echo ""
-echo "[4/4] Exporting debug GLB …"
+echo "[5/5] Exporting debug GLB …"
 python -u "$PROJECT_DIR/scripts/export_debug_glb.py" \
-    --mesh   "$OUTPUT_DIR/sam3_boundary_mesh.ply"       \
+    --mesh   "$OUTPUT_DIR/raw_mesh_rgb.ply"       \
     --traj   "$OUTPUT_DIR/sparse/trajectory_open3d.log" \
     --output "$OUTPUT_DIR/debug.glb"
 
 echo ""
 echo "════════════════════════════════════════"
 echo " Done"
-echo " mesh     : $OUTPUT_DIR/sam3_boundary_mesh.ply"
+echo " mesh     : $OUTPUT_DIR/raw_mesh_rgb.ply"
 echo " segments : $OUTPUT_DIR/sam3_segments/"
 echo " debug    : $OUTPUT_DIR/debug.glb"
 echo " log      : $LOG"
