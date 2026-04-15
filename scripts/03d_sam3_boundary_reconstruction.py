@@ -719,6 +719,74 @@ def segment_mesh_with_boundaries(mesh, is_boundary):
     return vertex_labels
 
 
+def _run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size, thresh_dir):
+    """
+    Run culling + segmentation + streaming segment export for one alpha threshold.
+
+    All outputs land in thresh_dir:
+      culled_mesh_rgb.ply  — raw RGB mesh with seam vertices removed
+      segments.ply         — pseudo-colour segment visualisation
+      sam3_segments/       — individual stone submeshes
+    """
+    os.makedirs(thresh_dir, exist_ok=True)
+    segments_dir = os.path.join(thresh_dir, 'sam3_segments')
+    os.makedirs(segments_dir, exist_ok=True)
+
+    is_boundary = alpha_scores < threshold
+    n_seam = is_boundary.sum()
+    pct    = 100 * n_seam / len(alpha_scores)
+    print(f"\n── threshold={threshold:g}  "
+          f"seam vertices: {n_seam:,}/{len(alpha_scores):,} ({pct:.1f}%) ──")
+    print(f"   dir: {thresh_dir}")
+
+    # Optional BFS propagation to fatten the seam network
+    if hops > 0:
+        print(f"  Propagating boundary (max_hops={hops})...")
+        boundary_scores   = propagate_boundary_scores(mesh, is_boundary, max_hops=hops)
+        is_boundary_final = boundary_scores > 0
+    else:
+        is_boundary_final = is_boundary
+
+    # culled_mesh_rgb.ply
+    culled_mesh = cull_mesh_by_alpha(mesh, alpha_scores, threshold)
+    culled_path = os.path.join(thresh_dir, 'culled_mesh_rgb.ply')
+    o3d.io.write_triangle_mesh(culled_path, culled_mesh)
+    print(f"  ✓ culled_mesh_rgb.ply  ({os.path.getsize(culled_path)/(1024**2):.1f} MB)")
+    del culled_mesh
+
+    # Segmentation
+    vertex_labels = segment_mesh_with_boundaries(mesh, is_boundary_final)
+
+    # segments.ply
+    seg_color_mesh = make_segment_color_mesh(mesh, vertex_labels)
+    segs_vis_path  = os.path.join(thresh_dir, 'segments.ply')
+    o3d.io.write_triangle_mesh(segs_vis_path, seg_color_mesh)
+    print(f"  ✓ segments.ply")
+    del seg_color_mesh
+
+    # Stream individual submeshes
+    triangles     = np.asarray(mesh.triangles)
+    unique_labels = np.unique(vertex_labels)
+    unique_labels = unique_labels[unique_labels >= 0]
+    saved_count   = 0
+
+    for label in tqdm(unique_labels, desc=f"  Saving segments (thresh={threshold:g})"):
+        tri_mask = np.all(vertex_labels[triangles] == label, axis=1)
+        if tri_mask.sum() < min_cluster_size:
+            continue
+        submesh = o3d.geometry.TriangleMesh(mesh)
+        submesh.remove_triangles_by_mask(~tri_mask)
+        submesh.remove_unreferenced_vertices()
+        submesh.compute_vertex_normals()
+        o3d.io.write_triangle_mesh(
+            os.path.join(segments_dir, f"segment_{label:04d}.ply"), submesh)
+        saved_count += 1
+        del submesh
+
+    print(f"  ✓ {saved_count} segments saved → {segments_dir}/")
+    return culled_path, segs_vis_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAM3 boundary-based segmentation + 3D reconstruction"
@@ -730,9 +798,11 @@ def main():
     parser.add_argument('--trajectory', type=str, required=True,
                        help='ORB_SLAM3 trajectory (Open3D format)')
     parser.add_argument('--output', type=str, required=True,
-                       help='Output mesh path')
-    parser.add_argument('--segments_dir', type=str, required=True,
-                       help='Directory for individual segment meshes')
+                       help='Base output path; its directory receives raw_mesh_rgb.ply, '
+                            'score_map_mesh.ply, alpha_maps/, and thresh_*/ subdirs')
+    parser.add_argument('--segments_dir', type=str, default=None,
+                       help='Ignored when multiple --alpha_thresholds are given '
+                            '(segments go into thresh_*/sam3_segments/ automatically)')
 
     # SAM3 parameters
     parser.add_argument('--sam_prompt', type=str, default="individual stone",
@@ -761,18 +831,19 @@ def main():
     # Segmentation parameters
     parser.add_argument('--mesh_keep_components', type=int, default=1,
                        help='Keep only the N largest connected components after TSDF '
-                            'to remove floating noise (default: 8, 0 = disabled)')
-    parser.add_argument('--alpha_threshold', type=float, default=0.1,
-                       help='Alpha score below which a vertex is classified as seam/background '
-                            '(default: 0.1). Higher = more aggressive culling of seam vertices.')
+                            'to remove floating noise (default: 1, 0 = disabled)')
+    parser.add_argument('--alpha_thresholds', type=float, nargs='+', default=[0.1],
+                       help='One or more alpha thresholds to sweep. Each value produces a '
+                            'thresh_<t>/ subdirectory with culled_mesh_rgb.ply, segments.ply, '
+                            'and sam3_segments/. Expensive passes (TSDF, EDT) run only once. '
+                            'Example: --alpha_thresholds 0.1 0.2 0.3 0.5')
     parser.add_argument('--edt_gamma', type=float, default=0.5,
                        help='Gamma for EDT score falloff: score = (dist/max_dist)**gamma. '
                             '<1 (e.g. 0.5): interiors saturate quickly, sharp seams. '
                             '=1: linear. >1: slow rise, more conservative. (default: 0.5)')
-    parser.add_argument('--boundary_propagation_hops', type=int, default=5,
-                       help='BFS hops to propagate boundary scores outward from seam seeds '
-                            '(default: 5). Larger values fatten the seam network and reduce '
-                            'small island fragments. Set to 0 to disable propagation.')
+    parser.add_argument('--boundary_propagation_hops', type=int, default=0,
+                       help='BFS hops to propagate boundary scores outward from seam seeds. '
+                            'Larger values fatten the seam network. 0 = disabled (default).')
     parser.add_argument('--min_cluster_size', type=int, default=1000,
                        help='Minimum triangles per segment')
 
@@ -791,14 +862,21 @@ def main():
     poses = load_trajectory_log(args.trajectory)
     print(f"✓ Loaded {len(poses)} poses")
 
-    os.makedirs(args.segments_dir, exist_ok=True)
     # Cache SAM3 masks beside the extracted frames so they survive
     # across multiple meshing runs from the same bag.
     cache_dir = os.path.join(args.frames_dir, 'sam3_mask_cache')
     os.makedirs(cache_dir, exist_ok=True)
     print(f"SAM3 mask cache: {cache_dir}")
 
-    # Pass 1: TSDF fusion (all frames, no SAM3)
+    # All shared outputs go into out_dir; threshold-specific into out_dir/thresh_<t>/
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(out_dir, exist_ok=True)
+
+    thresholds = sorted(set(args.alpha_thresholds))
+    print(f"\nAlpha thresholds to sweep: {thresholds}")
+    print(f"EDT gamma               : {args.edt_gamma}")
+
+    # ── Pass 1: raw RGB TSDF (all frames, no SAM3) ───────────────────────────
     mesh = integrate_tsdf(
         args.frames_dir, intrinsic, poses,
         depth_scale=depth_scale,
@@ -808,20 +886,15 @@ def main():
         confidence_threshold=args.confidence_threshold,
     )
 
-    # Clean mesh: drop small floating fragments before voting
     if args.mesh_keep_components > 0:
         mesh = clean_mesh_keep_largest(mesh, keep_n=args.mesh_keep_components)
-
-    # All outputs go into the same directory; --output names the raw RGB mesh
-    out_dir = os.path.dirname(os.path.abspath(args.output))
-    os.makedirs(out_dir, exist_ok=True)
 
     raw_mesh_path = os.path.join(out_dir, 'raw_mesh_rgb.ply')
     o3d.io.write_triangle_mesh(raw_mesh_path, mesh)
     print(f"\n✓ Raw RGB mesh: {raw_mesh_path} "
           f"({os.path.getsize(raw_mesh_path)/(1024**2):.1f} MB)")
 
-    # Pass 2a: EDT — compute alpha maps in parallel, save to alpha_dir
+    # ── Pass 2a: EDT alpha maps (parallel, cached per gamma) ─────────────────
     color_files, _ = get_rgbd_file_lists(args.frames_dir)
     n_total  = min(len(color_files), len(poses))
     n_cached = sum(1 for i in range(n_total)
@@ -845,7 +918,7 @@ def main():
         processor=processor,
     )
 
-    # Pass 2b: semantic TSDF — reads pre-computed alphas, no EDT
+    # ── Pass 2b: semantic TSDF (reads pre-computed alphas) ───────────────────
     alpha_mesh = integrate_semantic_tsdf(
         args.frames_dir, intrinsic, poses,
         alpha_dir=alpha_dir,
@@ -855,83 +928,43 @@ def main():
         depth_min_m=args.depth_min,
     )
 
-    # Transfer alpha scores to raw mesh vertices (raw mesh RGB untouched)
+    # ── Score transfer (once) ─────────────────────────────────────────────────
     print("\nTransferring alpha scores to raw mesh...")
     alpha_scores = transfer_alpha_scores(mesh, alpha_mesh)
-    is_boundary = alpha_scores < args.alpha_threshold
-    n_seam = is_boundary.sum()
-    print(f"  is_boundary (alpha < {args.alpha_threshold}): "
-          f"{n_seam:,} / {len(alpha_scores):,} vertices ({100*n_seam/len(alpha_scores):.1f}%)")
+    del alpha_mesh   # no longer needed
 
-    # score_map_mesh.ply — alpha score visualization (blue=interior, red=seam)
+    # score_map_mesh.ply — shared across all thresholds (depends only on gamma)
     score_map_path = os.path.join(out_dir, 'score_map_mesh.ply')
     score_mesh = make_boundary_score_mesh(mesh, 1.0 - alpha_scores)
     o3d.io.write_triangle_mesh(score_map_path, score_mesh)
     print(f"✓ Score map mesh: {score_map_path}")
+    del score_mesh
 
-    # culled_mesh_rgb.ply — raw RGB mesh with seam/background vertices removed
-    print("\nApplying vertex culling...")
-    culled_mesh = cull_mesh_by_alpha(mesh, alpha_scores, args.alpha_threshold)
-    culled_mesh_path = os.path.join(out_dir, 'culled_mesh_rgb.ply')
-    o3d.io.write_triangle_mesh(culled_mesh_path, culled_mesh)
-    print(f"✓ Culled RGB mesh: {culled_mesh_path} "
-          f"({os.path.getsize(culled_mesh_path)/(1024**2):.1f} MB)")
+    # ── Threshold sweep ───────────────────────────────────────────────────────
+    print(f"\n{'='*80}")
+    print(f"Threshold sweep: {len(thresholds)} value(s)")
+    print(f"{'='*80}")
 
-    # Optional BFS propagation to fill gaps in the seam network
-    if args.boundary_propagation_hops > 0:
-        print(f"\nPropagating boundary scores (max_hops={args.boundary_propagation_hops})...")
-        boundary_scores  = propagate_boundary_scores(
-            mesh, is_boundary, max_hops=args.boundary_propagation_hops
+    for t in thresholds:
+        thresh_dir = os.path.join(out_dir, f"thresh_{t:g}")
+        _run_threshold(
+            mesh, alpha_scores,
+            threshold=t,
+            hops=args.boundary_propagation_hops,
+            min_cluster_size=args.min_cluster_size,
+            thresh_dir=thresh_dir,
         )
-        is_boundary_final = boundary_scores > 0
-    else:
-        is_boundary_final = is_boundary
-
-    # Segment mesh using boundary vertex labels
-    vertex_labels = segment_mesh_with_boundaries(mesh, is_boundary_final)
-
-    # segments.ply — pseudo-color segment visualization
-    segments_vis_path = os.path.join(out_dir, 'segments.ply')
-    seg_color_mesh = make_segment_color_mesh(mesh, vertex_labels)
-    o3d.io.write_triangle_mesh(segments_vis_path, seg_color_mesh)
-    print(f"✓ Segments vis: {segments_vis_path}")
-
-    # Stream individual segment meshes to disk one at a time to avoid OOM.
-    # Each submesh is extracted, written, then freed before the next one.
-    print(f"\nSaving segments to {args.segments_dir}/")
-    os.makedirs(args.segments_dir, exist_ok=True)
-    triangles = np.asarray(mesh.triangles)
-    unique_labels = np.unique(vertex_labels)
-    unique_labels = unique_labels[unique_labels >= 0]
-    saved_count = 0
-
-    for label in tqdm(unique_labels, desc="Saving segments"):
-        tri_mask = np.all(vertex_labels[triangles] == label, axis=1)
-        if tri_mask.sum() < args.min_cluster_size:
-            vertex_labels[vertex_labels == label] = -1   # mark as boundary in debug mesh
-            continue
-
-        submesh = o3d.geometry.TriangleMesh(mesh)        # deep copy
-        submesh.remove_triangles_by_mask(~tri_mask)
-        submesh.remove_unreferenced_vertices()
-        submesh.compute_vertex_normals()
-
-        seg_path = os.path.join(args.segments_dir, f"segment_{label:04d}.ply")
-        o3d.io.write_triangle_mesh(seg_path, submesh)
-        saved_count += 1
-        del submesh                                       # free before next iteration
-
-    print(f"✓ Saved {saved_count} segments")
 
     print("\n" + "="*80)
     print("Reconstruction Complete!")
     print("="*80)
-    print(f"\nOutputs:")
-    print(f"  raw_mesh_rgb.ply    : {raw_mesh_path}")
-    print(f"  score_map_mesh.ply  : {score_map_path}")
-    print(f"  culled_mesh_rgb.ply : {culled_mesh_path}")
-    print(f"  segments.ply        : {segments_vis_path}")
-    print(f"  segments/           : {args.segments_dir}/segment_*.ply")
+    print(f"\nShared outputs (gamma={args.edt_gamma:g}):")
+    print(f"  raw_mesh_rgb.ply   : {raw_mesh_path}")
+    print(f"  score_map_mesh.ply : {score_map_path}")
+    print(f"  alpha_maps/        : {alpha_dir}/")
+    print(f"\nPer-threshold outputs:")
+    for t in thresholds:
+        print(f"  thresh_{t:g}/      : {os.path.join(out_dir, f'thresh_{t:g}')}")
 
 
 if __name__ == "__main__":
