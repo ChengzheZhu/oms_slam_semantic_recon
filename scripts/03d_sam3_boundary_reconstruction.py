@@ -719,7 +719,8 @@ def segment_mesh_with_boundaries(mesh, is_boundary):
     return vertex_labels
 
 
-def _run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size, thresh_dir):
+def _run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size, thresh_dir,
+                   save_segments=True):
     """
     Run culling + segmentation + streaming segment export for one alpha threshold.
 
@@ -753,6 +754,9 @@ def _run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size, thresh
     o3d.io.write_triangle_mesh(culled_path, culled_mesh)
     print(f"  ✓ culled_mesh_rgb.ply  ({os.path.getsize(culled_path)/(1024**2):.1f} MB)")
     del culled_mesh
+
+    if not save_segments:
+        return culled_path
 
     # Segmentation
     vertex_labels = segment_mesh_with_boundaries(mesh, is_boundary_final)
@@ -846,6 +850,10 @@ def main():
                             'Larger values fatten the seam network. 0 = disabled (default).')
     parser.add_argument('--min_cluster_size', type=int, default=1000,
                        help='Minimum triangles per segment')
+    parser.add_argument('--skip_segments', action='store_true',
+                       help='Skip segmentation and individual segment export; '
+                            'only culled_mesh_rgb.ply is saved per threshold. '
+                            'Useful for quick threshold tuning.')
 
     args = parser.parse_args()
 
@@ -953,6 +961,7 @@ def main():
             hops=args.boundary_propagation_hops,
             min_cluster_size=args.min_cluster_size,
             thresh_dir=thresh_dir,
+            save_segments=not args.skip_segments,
         )
 
     print("\n" + "="*80)
