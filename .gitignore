@@ -53,6 +53,7 @@ next_steps.sh
 debug_sam3_output/
 
 # Archived / experimental scripts (kept locally, not tracked)
+_old/
 scripts/_old/
 
 # ORB_SLAM3 submodule build artifacts
