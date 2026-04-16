@@ -34,6 +34,7 @@ python "$PROJECT_DIR/scripts/02_slam.py" \
     --output_dir "$OUTPUT_DIR" \
     --fps        "$FPS"        \
     --headless                 \
+    --equalize                 \
     $ATLAS_ARG                 \
     ${LOAD_ATLAS_ARG:-}        \
     ${LOCALIZE:-}

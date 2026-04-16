@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 
+import cv2
 import numpy as np
 
 
@@ -59,6 +60,58 @@ def create_associations(frames_dir, output_file, fps=30.0):
             ts = real_ts[i] if (real_ts and i < len(real_ts)) else float(i) / fps
             f.write(f"{ts:.6f} color/{color_files[i]} {ts:.6f} depth/{depth_files[i]}\n")
     return output_file
+
+
+# ---------------------------------------------------------------------------
+# CLAHE preprocessing — normalized color frames for SLAM only
+# ---------------------------------------------------------------------------
+
+def apply_clahe_to_frames(frames_dir: str, out_dir: str) -> str:
+    """
+    Build a lightweight SLAM-only frames directory with CLAHE-normalized color.
+
+    Structure of out_dir mirrors frames_dir:
+      out_dir/color/  — CLAHE-equalized copies of the original color frames
+      out_dir/depth   → symlink to frames_dir/depth  (originals, unmodified)
+      out_dir/*       → symlinks for all other files/dirs (timestamps.txt, etc.)
+
+    The original frames_dir/color/ is never touched — 03_tsdf_rgb.py reads from
+    there and will see the unmodified images.
+
+    Returns out_dir (for chaining).
+    """
+    color_src = os.path.join(frames_dir, 'color')
+    color_dst = os.path.join(out_dir, 'color')
+    os.makedirs(color_dst, exist_ok=True)
+
+    # Symlink every entry except 'color' so depth/timestamps/etc. are accessible
+    for entry in os.listdir(frames_dir):
+        if entry == 'color':
+            continue
+        os.symlink(os.path.abspath(os.path.join(frames_dir, entry)),
+                   os.path.join(out_dir, entry))
+
+    color_files = sorted(
+        f for f in os.listdir(color_src) if f.endswith(('.jpg', '.png')))
+    print(f"  Applying CLAHE to {len(color_files)} color frames "
+          f"(clipLimit=2.0, tile=8×8) …")
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    for fname in color_files:
+        img = cv2.imread(os.path.join(color_src, fname))
+        if img is None:
+            # Fall back to copying the original so associations.txt stays valid
+            shutil.copy2(os.path.join(color_src, fname),
+                         os.path.join(color_dst, fname))
+            continue
+        # Normalize local contrast in L*a*b* luminance channel only
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        cv2.imwrite(os.path.join(color_dst, fname),
+                    cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
+
+    print(f"  CLAHE done — TSDF will still use originals in {color_src}")
+    return out_dir
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +208,10 @@ def main():
                         help='Disable ORB-SLAM3 viewer (default: True)')
     parser.add_argument('--viewer',      action='store_true',
                         help='Enable ORB-SLAM3 viewer window')
+    parser.add_argument('--equalize',    action='store_true',
+                        help='Apply CLAHE on luminance channel before SLAM '
+                             '(normalises RealSense exposure; originals kept '
+                             'for dense TSDF in step 03)')
     args = parser.parse_args()
 
     use_viewer = args.viewer and not args.headless
@@ -187,16 +244,29 @@ def main():
         print(f"ERROR: rgbd_tum binary not found: {orbslam_exec}")
         sys.exit(1)
 
-    # ── Step 1: associations ─────────────────────────────────────────────
-    assoc_file = os.path.join(args.frames_dir, 'associations.txt')
-    if not os.path.exists(assoc_file):
-        print("\n[1/3] Generating associations.txt…")
-        create_associations(args.frames_dir, assoc_file, fps=args.fps)
+    # ── Step 1: CLAHE preprocessing (optional) ───────────────────────────
+    # slam_frames_dir is what rgbd_tum sees; args.frames_dir is kept for TSDF.
+    clahe_tmpdir = None
+    if args.equalize:
+        print("\n[1/3] CLAHE preprocessing (SLAM only — originals kept for TSDF)…")
+        clahe_tmpdir = tempfile.mkdtemp(prefix='slam_clahe_')
+        slam_frames_dir = apply_clahe_to_frames(args.frames_dir, clahe_tmpdir)
     else:
-        print(f"\n[1/3] associations.txt already exists — skipping")
+        slam_frames_dir = args.frames_dir
 
-    # ── Step 2: run ORB-SLAM3 ────────────────────────────────────────────
-    print("\n[2/3] Running ORB-SLAM3…")
+    # ── Step 2: associations ─────────────────────────────────────────────
+    # Always write into slam_frames_dir so rgbd_tum finds color/ and depth/
+    # at the right relative paths.
+    assoc_file = os.path.join(slam_frames_dir, 'associations.txt')
+    step_label = "2" if args.equalize else "1"
+    if not os.path.exists(assoc_file):
+        print(f"\n[{step_label}/3] Generating associations.txt…")
+        create_associations(slam_frames_dir, assoc_file, fps=args.fps)
+    else:
+        print(f"\n[{step_label}/3] associations.txt already exists — skipping")
+
+    # ── Step 3: run ORB-SLAM3 ────────────────────────────────────────────
+    print("\n[3/3] Running ORB-SLAM3…" if args.equalize else "\n[2/3] Running ORB-SLAM3…")
 
     with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False,
                                      prefix='orbslam_') as tmp:
@@ -213,39 +283,53 @@ def main():
                 f.write(f'\nSystem.LoadAtlasFromFile: "{args.load_atlas}"\n')
 
         env = os.environ.copy()
-        env['LD_LIBRARY_PATH'] = (
-            f"{orbslam_dir}/lib:/usr/local/lib:"
-            + env.get('LD_LIBRARY_PATH', ''))
+        env['LD_LIBRARY_PATH'] = ':'.join(filter(None, [
+            f"{orbslam_dir}/lib",
+            f"{orbslam_dir}/Thirdparty/DBoW2/lib",
+            f"{orbslam_dir}/Thirdparty/g2o/lib",
+            "/usr/local/lib",
+            env.get('LD_LIBRARY_PATH', ''),
+        ]))
 
         cmd = [
             orbslam_exec,
             args.vocab,
             tmp_yaml,
-            args.frames_dir,
+            slam_frames_dir,   # CLAHE dir (or original if --equalize not set)
             assoc_file,
             '1' if use_viewer else '0',
         ]
         if args.localize:
             cmd.append('localize')
 
-        result = subprocess.run(cmd, cwd=orbslam_dir, env=env)
+        # Remove any stale output files in output_dir before the run so a
+        # crash can't be mistaken for success (ORB-SLAM3 writes to CWD).
+        for fname in ['CameraTrajectory.txt', 'KeyFrameTrajectory.txt',
+                      'LocalizedPoses.txt']:
+            stale = os.path.join(args.output_dir, fname)
+            if os.path.exists(stale):
+                os.remove(stale)
+
+        # Run with output_dir as CWD — trajectory files land there directly,
+        # no hidden outputs in the source tree.
+        result = subprocess.run(cmd, cwd=args.output_dir, env=env)
         if result.returncode != 0:
             print("WARNING: ORB-SLAM3 exited non-zero "
                   "(cleanup crash is normal — checking for trajectory)")
     finally:
         os.unlink(tmp_yaml)
+        if clahe_tmpdir and os.path.exists(clahe_tmpdir):
+            shutil.rmtree(clahe_tmpdir, ignore_errors=True)
 
-    # ── Copy trajectories ─────────────────────────────────────────────────
-    copied = 0
+    # ── Verify trajectories written to output_dir ─────────────────────────
+    found = 0
     for fname in ['CameraTrajectory.txt', 'KeyFrameTrajectory.txt']:
-        src = os.path.join(orbslam_dir, fname)
-        dst = os.path.join(args.output_dir, fname)
-        if os.path.exists(src):
-            shutil.copy2(src, dst)
-            print(f"  ✓ {fname} → {dst}")
-            copied += 1
+        path = os.path.join(args.output_dir, fname)
+        if os.path.exists(path):
+            print(f"  ✓ {fname}")
+            found += 1
 
-    if copied == 0:
+    if found == 0:
         print("ERROR: No trajectory files produced — SLAM failed")
         sys.exit(1)
 
