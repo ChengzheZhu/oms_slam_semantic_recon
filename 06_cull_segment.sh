@@ -10,7 +10,7 @@ source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
 conda activate slam_recon
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATASET=base
+DATASET=base-highres
 
 # ── EDIT THESE ────────────────────────────────────────────────────────────────
 RAW_MESH=$PROJECT_DIR/output/$DATASET/raw_mesh_rgb.ply
@@ -18,14 +18,14 @@ ALPHA_MESH=$PROJECT_DIR/output/$DATASET/scoring/alpha_mesh.ply
 OUTPUT_DIR=$PROJECT_DIR/output/$DATASET/segments
 
 # Space-separated list; each value → thresh_<t>/ subdir
-ALPHA_THRESHOLDS="0.5"
+ALPHA_THRESHOLDS="0.4"
 
 MESH_KEEP_COMPONENTS=1   # keep N largest components (0 = disabled)
 BOUNDARY_HOPS=0          # BFS hops to fatten seam network (0 = disabled)
 MIN_CLUSTER_SIZE=1000    # minimum triangles per saved segment
 
 # Uncomment to skip per-stone PLY export (threshold tuning only):
-# SKIP_SEGMENTS=--skip_segments
+SKIP_SEGMENTS=--skip_segments
 # ──────────────────────────────────────────────────────────────────────────────
 
 python "$PROJECT_DIR/scripts/06_cull_segment.py" \
