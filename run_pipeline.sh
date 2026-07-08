@@ -38,7 +38,7 @@ run_step 1 "$PROJECT_DIR/01_extract.sh"
 run_step 2 "$PROJECT_DIR/02_slam.sh"
 run_step 3 "$PROJECT_DIR/03_tsdf_rgb.sh"
 run_step 4 "$PROJECT_DIR/04_sam3_mask.sh"
-run_step 5 "$PROJECT_DIR/05_sam3_score.sh"
+run_step 5 "$PROJECT_DIR/05_sam3_score_fusion.sh"
 run_step 6 "$PROJECT_DIR/06_cull_segment.sh"
 
 echo ""
