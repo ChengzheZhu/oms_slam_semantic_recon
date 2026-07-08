@@ -2,9 +2,9 @@
 """
 04_sam3_mask.py — Pre-compute SAM3 raw mask cache for all extracted frames (L1 cache).
 
-Two-pass approach:
-  Pass 1: "individual stone" prompt → stone masks
-  Pass 2: "QR code" prompt          → QR masks
+Single-pass approach (image encoded once per frame, two prompts share the encoding):
+  Prompt 1: "individual stone" → stone masks
+  Prompt 2: "QR code"          → QR masks
 
 QR hole recovery (CPU, post-process):
   QR codes attached to stones appear as holes in the stone mask.
@@ -31,7 +31,8 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from PIL import Image, ImageDraw
-from scipy.ndimage import binary_dilation
+import cv2
+from multiprocessing import Pool
 import torch
 
 from sam3 import build_sam3_image_model
@@ -56,69 +57,108 @@ def initialize_sam3(confidence_threshold=0.1):
     return processor
 
 
-def cache_masks_frame(image_path, processor, prompt, cache_path):
-    if os.path.exists(cache_path):
+def cache_masks_frame_multi(image_path, processor, prompts_and_paths):
+    """
+    Encode the image once, then query each (prompt, cache_path) pair in turn.
+    Already-cached paths are skipped; if all are cached the image is never loaded.
+    """
+    needed = [(p, cp) for p, cp in prompts_and_paths if not os.path.exists(cp)]
+    if not needed:
         return
+
     image = Image.open(image_path)
     if image.mode == 'RGBA':
         image = image.convert('RGB')
     h, w = image.size[1], image.size[0]
 
-    state = processor.set_image(image)
-    processor.reset_all_prompts(state)
-    state = processor.set_text_prompt(state=state, prompt=prompt)
+    state = processor.set_image(image)   # encode image ONCE
 
-    masks  = state["masks"]
-    scores = state["scores"]
+    for prompt, cache_path in needed:
+        # reset_all_prompts clears previous text features + results but keeps
+        # the image backbone encoding in state["backbone_out"]
+        processor.reset_all_prompts(state)
+        state = processor.set_text_prompt(state=state, prompt=prompt)
 
-    if masks.shape[0] == 0:
-        masks_np  = np.zeros((0, h, w), dtype=np.uint8)
-        scores_np = np.zeros(0, dtype=np.float32)
-    else:
-        masks_np  = masks.squeeze(1).cpu().numpy().astype(np.uint8)
-        scores_np = scores.float().cpu().numpy()
+        masks  = state["masks"]
+        scores = state["scores"]
 
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    np.savez_compressed(cache_path, masks=masks_np, scores=scores_np)
+        if masks.shape[0] == 0:
+            masks_np  = np.zeros((0, h, w), dtype=np.uint8)
+            scores_np = np.zeros(0, dtype=np.float32)
+        else:
+            masks_np  = masks.squeeze(1).cpu().numpy().astype(np.uint8)
+            scores_np = scores.float().cpu().numpy()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# QR enclosure check
-# ─────────────────────────────────────────────────────────────────────────────
-
-def check_qr_enclosed(qr_mask, stone_masks, ring_px=10, min_coverage=0.5):
-    """
-    Dilate qr_mask outward by ring_px pixels and subtract the original to get
-    the surrounding ring.  Return the index of the stone mask that covers the
-    largest fraction of the ring, or -1 if no stone covers >= min_coverage.
-    """
-    struct   = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=bool)
-    expanded = binary_dilation(qr_mask, structure=struct)
-    ring     = expanded & ~qr_mask
-    ring_size = int(ring.sum())
-    if ring_size == 0:
-        return -1
-
-    best_idx = -1
-    best_cov = 0.0
-    for i, smask in enumerate(stone_masks):
-        cov = float((ring & smask).sum()) / ring_size
-        if cov > best_cov:
-            best_cov = cov
-            best_idx = i
-
-    return best_idx if best_cov >= min_coverage else -1
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez_compressed(cache_path, masks=masks_np, scores=scores_np)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QR hole recovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-def apply_qr_recovery(stone_cache_dir, qr_cache_dir, combined_dir, n_frames,
-                       ring_px=10, min_coverage=0.5):
+def _recovery_worker(args):
     """
-    For each frame: load stone masks + QR masks, merge enclosed QR masks into
-    the surrounding stone mask, save to combined_dir.
+    Per-frame worker (module-level for multiprocessing pickling).
+    Returns number of QR masks merged in this frame.
+    """
+    i, stone_cache_dir, qr_cache_dir, combined_dir, ring_px, min_coverage = args
+
+    out_path = os.path.join(combined_dir, f"masks_{i:06d}.npz")
+    if os.path.exists(out_path):
+        return 0
+
+    stone_path = os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")
+    qr_path    = os.path.join(qr_cache_dir,    f"masks_{i:06d}.npz")
+
+    stone_data   = np.load(stone_path)
+    stone_masks  = stone_data['masks'].astype(bool)    # (N, H, W)
+    stone_scores = stone_data['scores'].astype(np.float32)
+
+    if not os.path.exists(qr_path):
+        np.savez_compressed(out_path, masks=stone_masks.astype(np.uint8),
+                            scores=stone_scores)
+        return 0
+
+    qr_data  = np.load(qr_path)
+    qr_masks = qr_data['masks'].astype(bool)    # (M, H, W)
+
+    if qr_masks.shape[0] == 0 or stone_masks.shape[0] == 0:
+        np.savez_compressed(out_path, masks=stone_masks.astype(np.uint8),
+                            scores=stone_scores)
+        return 0
+
+    # cv2.dilate is ~10× faster than scipy binary_dilation on large kernels
+    kernel      = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=np.uint8)
+    merged_masks = stone_masks.copy()
+    # precompute float32 view for vectorised coverage sum
+    stone_f     = stone_masks.astype(np.float32)   # (N, H, W)
+    n_merged    = 0
+
+    for qr_mask in qr_masks:
+        expanded  = cv2.dilate(qr_mask.astype(np.uint8), kernel)
+        ring      = expanded.astype(bool) & ~qr_mask
+        ring_size = int(ring.sum())
+        if ring_size == 0:
+            continue
+
+        # vectorised: coverage of ring by every stone mask simultaneously
+        ring_f    = ring.astype(np.float32)
+        coverages = (stone_f * ring_f[np.newaxis]).sum(axis=(1, 2)) / ring_size
+        best_idx  = int(coverages.argmax())
+        if coverages[best_idx] >= min_coverage:
+            merged_masks[best_idx] |= qr_mask
+            n_merged += 1
+
+    np.savez_compressed(out_path, masks=merged_masks.astype(np.uint8),
+                        scores=stone_scores)
+    return n_merged
+
+
+def apply_qr_recovery(stone_cache_dir, qr_cache_dir, combined_dir, n_frames,
+                       ring_px=10, min_coverage=0.5, n_workers=4):
+    """
+    Parallel QR hole recovery across frames.
     Returns (combined_dir, total_merged_count).
     """
     os.makedirs(combined_dir, exist_ok=True)
@@ -129,54 +169,17 @@ def apply_qr_recovery(stone_cache_dir, qr_cache_dir, combined_dir, n_frames,
         print(f"  QR recovery already complete ({n_done}/{n_frames}) — skipping")
         return combined_dir, 0
 
-    n_merged_total  = 0
-    n_frames_merged = 0
+    frame_args = [
+        (i, stone_cache_dir, qr_cache_dir, combined_dir, ring_px, min_coverage)
+        for i in range(n_frames)
+    ]
 
-    for i in tqdm(range(n_frames), desc="QR hole recovery"):
-        out_path    = os.path.join(combined_dir,   f"masks_{i:06d}.npz")
-        if os.path.exists(out_path):
-            continue
+    with Pool(processes=n_workers) as pool:
+        results = list(tqdm(pool.imap(_recovery_worker, frame_args),
+                            total=n_frames, desc="QR hole recovery"))
 
-        stone_path  = os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")
-        qr_path     = os.path.join(qr_cache_dir,    f"masks_{i:06d}.npz")
-
-        stone_data   = np.load(stone_path)
-        stone_masks  = stone_data['masks'].astype(bool)    # (N, H, W)
-        stone_scores = stone_data['scores'].astype(np.float32)
-
-        # No QR cache or no QR detections → copy stone masks as-is
-        if not os.path.exists(qr_path):
-            np.savez_compressed(out_path,
-                                masks=stone_masks.astype(np.uint8),
-                                scores=stone_scores)
-            continue
-
-        qr_data  = np.load(qr_path)
-        qr_masks = qr_data['masks'].astype(bool)    # (M, H, W)
-
-        if qr_masks.shape[0] == 0 or stone_masks.shape[0] == 0:
-            np.savez_compressed(out_path,
-                                masks=stone_masks.astype(np.uint8),
-                                scores=stone_scores)
-            continue
-
-        merged_masks = stone_masks.copy()
-        n_merged = 0
-        for qr_mask in qr_masks:
-            stone_idx = check_qr_enclosed(qr_mask, stone_masks,
-                                          ring_px=ring_px,
-                                          min_coverage=min_coverage)
-            if stone_idx >= 0:
-                merged_masks[stone_idx] = merged_masks[stone_idx] | qr_mask
-                n_merged += 1
-
-        np.savez_compressed(out_path,
-                            masks=merged_masks.astype(np.uint8),
-                            scores=stone_scores)
-        if n_merged > 0:
-            n_merged_total  += n_merged
-            n_frames_merged += 1
-
+    n_merged_total  = sum(results)
+    n_frames_merged = sum(1 for r in results if r > 0)
     print(f"  ✓ QR recovery: {n_merged_total} QR regions merged "
           f"across {n_frames_merged} frames → {combined_dir}")
     return combined_dir, n_merged_total
@@ -371,6 +374,8 @@ def main():
                              'to count as enclosed (default 0.5)')
     parser.add_argument('--skip_qr_recovery', action='store_true',
                         help='Skip QR hole recovery; output cache = raw stone cache')
+    parser.add_argument('--n_workers',        type=int,   default=4,
+                        help='Parallel workers for QR hole recovery (default 4)')
     args = parser.parse_args()
 
     color_dir = os.path.join(args.frames_dir, 'color')
@@ -416,27 +421,24 @@ def main():
         os.makedirs(stone_cache_dir, exist_ok=True)
         os.makedirs(qr_cache_dir,    exist_ok=True)
 
-        if need_stone:
-            print(f"\nPass 1 — stone masks ({args.sam_prompt!r})")
-            for i, img_path in enumerate(tqdm(color_files, desc="SAM3 stone masks")):
-                cache_masks_frame(img_path, processor,
-                                  prompt=args.sam_prompt,
-                                  cache_path=os.path.join(
-                                      stone_cache_dir, f"masks_{i:06d}.npz"))
-            print(f"  ✓ Stone mask cache → {stone_cache_dir}")
-        else:
-            print(f"\nPass 1 — stone masks already complete ({n_stone_cached}/{n_total})")
+        print(f"\nCaching masks (image encoded once per frame; "
+              f"stone={need_stone}, qr={need_qr})")
+        for i, img_path in enumerate(tqdm(color_files, desc="SAM3 masks")):
+            prompts_and_paths = []
+            if need_stone:
+                prompts_and_paths.append(
+                    (args.sam_prompt,
+                     os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")))
+            if need_qr:
+                prompts_and_paths.append(
+                    (args.qr_prompt,
+                     os.path.join(qr_cache_dir,    f"masks_{i:06d}.npz")))
+            cache_masks_frame_multi(img_path, processor, prompts_and_paths)
 
+        if need_stone:
+            print(f"  ✓ Stone mask cache → {stone_cache_dir}")
         if need_qr:
-            print(f"\nPass 2 — QR masks ({args.qr_prompt!r})")
-            for i, img_path in enumerate(tqdm(color_files, desc="SAM3 QR masks")):
-                cache_masks_frame(img_path, processor,
-                                  prompt=args.qr_prompt,
-                                  cache_path=os.path.join(
-                                      qr_cache_dir, f"masks_{i:06d}.npz"))
-            print(f"  ✓ QR mask cache → {qr_cache_dir}")
-        else:
-            print(f"\nPass 2 — QR masks already complete ({n_qr_cached}/{n_total})")
+            print(f"  ✓ QR mask cache    → {qr_cache_dir}")
     else:
         print("\n  Both mask caches complete — skipping SAM3 inference.")
 
@@ -453,6 +455,7 @@ def main():
             n_frames           = n_total,
             ring_px            = args.qr_ring_px,
             min_coverage       = args.qr_min_coverage,
+            n_workers          = args.n_workers,
         )
 
     # ── Debug previews ────────────────────────────────────────────────────────

@@ -12,9 +12,9 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── EDIT THESE ────────────────────────────────────────────────────────────────
 FRAMES_DIR=/home/chengzhe/Data/OMS_data3/rs_bags/base_20260127_015119
 TRAJECTORY=$PROJECT_DIR/output/base/sparse/trajectory_open3d.log
-OUTPUT=$PROJECT_DIR/output/base/raw_mesh_rgb.ply
+OUTPUT=$PROJECT_DIR/output/base-highres/raw_mesh_rgb.ply
 
-VOXEL_SIZE=0.005  # metres; 0.005 = 5 mm
+VOXEL_SIZE=0.002  # metres; 0.005 = 5 mm
 DEPTH_MAX=3.0     # metres
 DEPTH_MIN=0.15    # metres
 CONFIDENCE=0      # 0=off, 1=drop zero-confidence, 2=keep high only

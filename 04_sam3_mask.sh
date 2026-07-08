@@ -26,9 +26,9 @@ FRAMES_DIR=/home/chengzhe/Data/OMS_data3/rs_bags/base_20260127_015119
 SAM_PROMPT="individual stone"
 SAM_CONFIDENCE=0.5
 
-QR_PROMPT="QR code"
-QR_RING_PX=10        # dilation ring size for enclosure check (pixels)
-QR_MIN_COVERAGE=0.75  # fraction of QR ring that must be stone to count as enclosed
+QR_PROMPT="QR code marker"
+QR_RING_PX=20        # dilation ring size for enclosure check (pixels)
+QR_MIN_COVERAGE=0.6  # fraction of QR ring that must be stone to count as enclosed
 
 # Uncomment to skip QR recovery (output = raw stone cache):
 # SKIP_QR=--skip_qr_recovery

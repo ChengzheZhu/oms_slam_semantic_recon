@@ -18,7 +18,7 @@ ALPHA_MESH=$PROJECT_DIR/output/$DATASET/scoring/alpha_mesh.ply
 OUTPUT_DIR=$PROJECT_DIR/output/$DATASET/segments
 
 # Space-separated list; each value → thresh_<t>/ subdir
-ALPHA_THRESHOLDS="0.4"
+ALPHA_THRESHOLDS="0.35"
 
 MESH_KEEP_COMPONENTS=1   # keep N largest components (0 = disabled)
 BOUNDARY_HOPS=0          # BFS hops to fatten seam network (0 = disabled)
