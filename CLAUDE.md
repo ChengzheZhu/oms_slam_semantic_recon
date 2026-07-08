@@ -1,197 +1,167 @@
-# ORB_SLAM3 RGB-D Dense Reconstruction — Claude Code Context
+# OMS SLAM Semantic Reconstruction — Claude Code Context
 
 ## Project overview
-Sub-project 2 of 3 in the OMS stone wall reconstruction pipeline:
-1. **OMS components** (`~/Projects/oms`) — MASt3R/VGGT + SAM3 → per-stone point clouds
+Sub-project 2 of 3 in the OMS stone-wall pipeline:
+1. **Components** (`oms_monocular_semantic_recon`) — MASt3R/VGGT + SAM3 → per-stone point clouds
 2. **This repo** — ORB-SLAM3 RGB-D SLAM + SAM3 EDT alpha scoring → segmented assembly mesh
-3. **Instance matching** (future) — geometry-based registration of individual stones into the assembly
+3. **Registration** (future) — geometry-based matching of stones into the assembly
 
-Uses a RealSense D456 camera. ORB-SLAM3 tracks the camera; Open3D TSDF fuses depth into a
-dense mesh; SAM3 EDT alpha scoring separates stone interiors from seams.
+RealSense D456 camera. ORB-SLAM3 tracks the camera; Open3D TSDF fuses depth into a dense
+mesh; SAM3 EDT alpha scoring separates stone interiors from seams.
+
+## Pipeline (6 numbered stages)
+Each stage = a root wrapper `NN_*.sh` (edit its config block) → `scripts/NN_*.py`.
+`run_pipeline.sh` runs the non-batched track (`bash run_pipeline.sh [first] [last]`).
+
+| # | Wrapper → script | Does |
+|---|------------------|------|
+| 01 | `01_extract.sh` → `01_extract_frames.py` | .bag → color/ depth/ confidence/ intrinsic.json timestamps.txt streams.json |
+| 02 | `02_slam.sh` → `02_slam.py` | ORB-SLAM3 RGB-D tracking **and** TUM→Open3D trajectory conversion → trajectory_open3d.log (+ pose-graph JSON) |
+| 03 | `03_tsdf_rgb.sh` → `03_tsdf_rgb.py` | TSDF-fuse all frames → raw_mesh_rgb.ply (geometry only) |
+| 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + QR); QR-hole recovery |
+| 05 | `05_sam3_score_fusion.sh` → `05_sam3_score.py` | **L2**: per-frame EDT alpha maps → semantic TSDF → alpha_maps/*.npz + alpha_mesh.ply |
+| 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer alpha→raw mesh, cull seam triangles, segment into stone submeshes |
+
+**Two tracks:**
+- **Non-batched** (`03 → 05 → 06`): single TSDF volume; orchestrated by `run_pipeline.sh`.
+- **Batched** (`03b → 05b → 06b`): overlapping temporal batches kept as separate meshes for
+  large / high-res (2 mm voxel) scenes; `batch_size`/`batch_overlap` **must match** across 03b & 05b.
+  Stages 01/02/04 are shared. Rationale: `docs/0421_dev_notes.md`.
+
+**Naming quirk:** step 5's non-batched wrapper is `05_sam3_score_fusion.sh` (calls
+`05_sam3_score.py`) — the `_fusion` suffix is inconsistent with the 03/04/06 wrappers.
+Left as-is pending the deferred file-layout restructure. The old plain `05_sam3_score.sh`
+was removed; `run_pipeline.sh` calls the fusion wrapper.
 
 ## Repo layout
 ```
-ORB_SLAM3_RGBD_DenseSlamReconstrction/
+oms_slam_semantic_recon/
+  01_extract.sh 02_slam.sh 03_tsdf_rgb.sh 04_sam3_mask.sh
+  05_sam3_score_fusion.sh 06_cull_segment.sh     — stage wrappers
+  03b_tsdf_rgb_batched.sh 05b_sam3_score_batched.sh 06b_cull_segment_batched.sh — batched variants
+  run_pipeline.sh                                — orchestrator (non-batched)
+  scripts/NN_*.py                                — stage implementations
   config/
     camera/RealSense_D456.yaml   — camera intrinsics for ORB-SLAM3
-  scripts/
-    00_extract_frames.py         — .bag → PNG frames + intrinsic.json + streams.json
-    01_run_orbslam3.sh           — runs ORB-SLAM3; passes viewer flag (0|1) as argv[5]
-    01b_run_sam3_alpha.py        — pre-compute SAM3 mask cache (L1) for all frames
-    02_convert_trajectory.py     — TUM format → Open3D log + pose graph JSON
-    03_dense_reconstruction.py   — TSDF mesh (geometry only, no SAM3)
-    03d_sam3_boundary_reconstruction.py — dual-TSDF + SAM3 EDT alpha → segmented mesh
-    export_debug_glb.py          — mesh + camera frustums → GLB for geometry inspection
-    create_associations.py       — TUM-format RGB-D associations file
-    trim_bag.py                  — trim RealSense bag to a time window
-    view_sam3.py                 — interactive viewer for SAM3 alpha images (TkAgg)
+    orbslam/                     — ORB-SLAM3 configs
+    pipeline/default.yaml        — pipeline defaults
   install/
-    install_dependencies.sh      — system apt packages (Eigen, Boost, OpenCV, etc.)
+    install_dependencies.sh      — system apt packages
     install_pangolin.sh          — builds Pangolin from source
-    build_orbslam3.sh            — builds ORB-SLAM3 C++ from source
-    setup_env.sh                 — creates slam_recon conda env + clones/installs SAM3
+    build_orbslam3.sh            — builds ORB-SLAM3 C++
+    setup_env.sh                 — creates slam_recon env + installs SAM3
   external/
     orbslam3/                    — git submodule: ChengzheZhu/ORB_SLAM3.git
-    sam3/                        — git submodule: ChengzheZhu/sam3.git (separate from OMS)
+    sam3/                        — git submodule: ChengzheZhu/sam3.git (separate from components repo)
   environment.yml                — conda env spec (slam_recon, Python 3.11)
-  run_full_pipeline.sh           — production: .bag → frames → SLAM → SAM3 mesh
-  run_quick_test_pipeline.sh     — quick test: coarser params, same flow
-  run_03d.sh                     — quick launcher for 03d with threshold sweep
-  run_meshing_with_segmentation.sh — re-mesh from existing SLAM output dir
+  docs/                          — SETUP.md + feature guides + 0421_dev_notes.md
 ```
 
 ## Environment
 - Conda env: **`slam_recon`** (Python 3.11, PyTorch 2.7+cu126, Open3D 0.19)
-- Create with: `bash install/setup_env.sh` (handles env + SAM3 editable install)
-- SAM3 lives at `external/sam3` — **separate** from OMS project's `deps/sam3`
-- Key version pins:
-  - `opencv-python<4.10` — numpy<2 compatibility (SAM3 requires numpy<2)
-  - `setuptools<71` — setuptools≥72 drops `pkg_resources` as top-level module
-  - `psutil` — SAM3 transitive dep (eagerly imported in sam3_video_predictor.py)
+- Create with `bash install/setup_env.sh` (env from `environment.yml` + SAM3 editable install)
+- SAM3 lives at `external/sam3` — **separate** from the components repo's SAM3
+- Version pins: `opencv-python<4.10` (numpy<2 compat), `setuptools<71` (keeps `pkg_resources`),
+  `psutil` (SAM3 eagerly imports it)
 
 ## ORB-SLAM3 binary
 - Built at `external/orbslam3/Examples/RGB-D/rgbd_tum`
-- Viewer is a **runtime flag** — 5th argv `0` = headless, `1` = Pangolin viewer
-- No recompile needed to switch modes; `01_run_orbslam3.sh --headless` passes `0`
+- Viewer is a **runtime flag** — 5th argv `0` = headless, `1` = Pangolin viewer (no recompile)
 - Vocabulary: `external/orbslam3/Vocabulary/ORBvoc.txt.tar.gz` → extract before first run
 
 ## Launching
 ```bash
-# Activate env
 conda activate slam_recon
 
-# Full pipeline (bag → frames → ORB-SLAM3 → SAM3 mesh → debug GLB)
-bash run_full_pipeline.sh /path/to/recording.bag
+# Full non-batched pipeline (edit dataset paths at the top of each NN_*.sh first)
+bash run_pipeline.sh              # stages 01–06
+bash run_pipeline.sh 3 6          # stages 03–06 only
 
-# Quick test (stride=3, coarser TSDF)
-bash run_quick_test_pipeline.sh /path/to/recording.bag
+# Single stage
+bash 04_sam3_mask.sh
 
-# Resume from existing frames (skip re-extraction)
-bash run_quick_test_pipeline.sh /path/to/recording.bag /path/to/existing/frames_dir
-
-# Tune alpha threshold (edit vars at top of run_03d.sh, then run)
-bash run_03d.sh
-
-# Step by step
-python scripts/00_extract_frames.py --bag recording.bag --output frames/ --stride 1
-bash scripts/01_run_orbslam3.sh frames/ output/sparse/ --fps 30 --headless
-python scripts/02_convert_trajectory.py \
-    --input output/sparse/CameraTrajectory.txt \
-    --output_log output/sparse/trajectory_open3d.log \
-    --output_json output/sparse/trajectory_pose_graph.json
-# Pre-compute SAM3 mask cache (once per frames_dir)
-python scripts/01b_run_sam3_alpha.py --frames_dir frames/
-# Run dual-TSDF with threshold sweep
-python scripts/03d_sam3_boundary_reconstruction.py \
-    --frames_dir frames/ --intrinsic frames/intrinsic.json \
-    --trajectory output/sparse/trajectory_open3d.log \
-    --output output/gamma_0.5/raw_mesh_rgb.ply \
-    --alpha_thresholds 0.2 0.3 0.5 \
-    --edt_gamma 0.5 --skip_segments
+# Batched track (large / high-res) — run stages individually
+bash 03b_tsdf_rgb_batched.sh && bash 05b_sam3_score_batched.sh && bash 06b_cull_segment_batched.sh
 ```
 
-## 03d pipeline (dual-TSDF)
+## Scoring model (stages 04–06)
 ```
-Pass 1  integrate_tsdf()
-    All frames → raw RGB TSDF → raw_mesh_rgb.ply
+04  SAM3 L1 mask cache
+    per frame → stone mask + QR mask (shared image encoding)
+    QR-hole recovery: QR-on-stone holes OR-merged back into the stone mask
+    → <frames_dir>/sam3_mask_cache_conf_<c>[_qr_filled]/masks_NNNNNN.npz
 
-Pass 2a  precompute_alphas()          [parallel, cached]
-    L1 mask cache → EDT → gamma → alpha_maps/alpha_NNNNNN.npz  (L2 cache)
-    score = (dist / max_dist) ** edt_gamma
-    0 = seam/background, 1 = stone interior
+05  L2 EDT alpha + semantic TSDF
+    L1 mask → EDT → gamma → alpha score  =  (dist / max_dist) ** edt_gamma
+      0 = seam/background, 1 = stone interior
+    → alpha_maps/alpha_NNNNNN.npz (L2 cache) + alpha_mesh.ply (grey = score)
 
-Pass 2b  integrate_semantic_tsdf()
-    L2 alpha maps → semantic TSDF → alpha_mesh (grayscale R=G=B=score)
-
-Scoring & culling  (once per run)
-    cKDTree: alpha_mesh vertices → raw_mesh vertices → alpha_scores[]
-    score_map_mesh.ply — blue=interior, red=seam
-
-Threshold sweep  (fast — no TSDF or EDT recompute)
-    For each --alpha_thresholds value t → thresh_<t>/
-      culled_mesh_rgb.ply  — raw RGB mesh, seam triangles removed
-      segments.ply         — pseudo-colour patches  (skipped with --skip_segments)
-      sam3_segments/       — individual stone PLYs  (skipped with --skip_segments)
+06  transfer + cull + segment
+    cKDTree: alpha_mesh vertices → raw_mesh vertices → per-vertex alpha
+    cull triangles below --alpha_threshold; segment remainder into stone patches
 ```
 
 ## Cache layers
 | Layer | Location | Content | Keyed on |
 |-------|----------|---------|----------|
-| L1 | `frames_dir/sam3_mask_cache/masks_NNNNNN.npz` | raw SAM3 masks (N,H,W) uint8 + scores (N,) float32 | sam_prompt, sam_confidence |
-| L2 | `output_dir/alpha_maps/alpha_NNNNNN.npz` | EDT alpha float32 (H,W) | edt_gamma, sam_max_size_ratio |
+| L1 | `frames_dir/sam3_mask_cache_conf_<c>[_qr_filled]/masks_NNNNNN.npz` | raw SAM3 masks + scores | sam_prompt, sam_confidence, QR filling |
+| L2 | `output_dir/scoring/alpha_maps/alpha_NNNNNN.npz` | EDT alpha float32 | edt_gamma, sam_max_size_ratio |
 
-Re-running `03d` with the same output dir and same gamma reuses the L2 cache and skips EDT entirely.
+Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips EDT).
 
 ## Key design decisions
-- **ORB-SLAM3 submodule**: `external/orbslam3` — built in-place; vocabulary not in git
-- **Runtime viewer toggle**: `rgbd_tum.cc` patched to accept argv[5] (0=headless, 1=viewer)
-- **FRAME_STRIDE matters**: stride=3 (100ms/frame) can cause tracking loss on fast camera
-  motion → prefer stride=1 (30fps, 33ms) for reliable single-map tracking
-- **SAM3 mask cache (L1)**: `01b_run_sam3_alpha.py` saves raw masks+scores; EDT and alpha
-  params (`edt_gamma`, `sam_max_size_ratio`, `alpha_threshold`) are applied on-the-fly so
-  SAM3 inference never needs to re-run when tuning downstream params
-- **EDT gamma**: non-linear score falloff `(dist/max_dist)**gamma`; gamma<1 makes interiors
-  saturate quickly for sharper seams; gamma=1 is linear; gamma>1 is more conservative
-- **Threshold sweep**: expensive passes (TSDF ×2, EDT) run once; culling + segmentation
-  loop over `--alpha_thresholds`; each threshold writes to `thresh_<t>/`
-- **CPU TSDF**: `ScalableTSDFVolume` (Open3D legacy API); GPU `VoxelBlockGrid` is
-  implemented but disabled — Open3D v0.19 has device-placement inconsistencies
-- **EDT thread pool**: `max(cpu_count - 4, 1)` threads; scipy EDT releases the GIL for
-  true CPU parallelism; single-threaded when SAM3 inference is running (GPU contention)
-- **Segmentation**: scipy `connected_components` + vectorised numpy COO edges (no Python
-  loops); streaming segment export (one submesh at a time) to avoid OOM
-- **Depth filter**: always-on zero/min-range filter; optional confidence threshold for
-  future bags that include a confidence stream
+- **ORB-SLAM3 submodule**: built in-place; vocabulary not in git
+- **Runtime viewer toggle**: `rgbd_tum.cc` accepts argv[5] (0=headless, 1=viewer)
+- **FRAME_STRIDE matters**: stride=1 (30 fps) is more reliable than stride=3 for tracking on fast motion
+- **EDT gamma**: `(dist/max_dist)**gamma`; gamma<1 sharpens seams, =1 linear, >1 conservative
+- **CPU TSDF**: `ScalableTSDFVolume` (Open3D legacy API); GPU `VoxelBlockGrid` disabled (v0.19 device issues)
+- **Batched track**: keeps TSDF batches as separate PLYs to hit 2 mm voxel within ~30 GB RAM;
+  scoring + culling operate on one batch mesh at a time (see `docs/0421_dev_notes.md`)
+- **QR-hole recovery** (step 04): QR markers on stones read as holes in the stone mask; a ring
+  dilation check merges an enclosed QR's pixels back into the covering stone mask
 - **Frames stored outside repo**: extracted frames go beside the bag file
 
 ## On a new machine
 ```bash
-git clone --recurse-submodules https://github.com/ChengzheZhu/ORB_SLAM3_RGBD_DenseSlamReconstrction.git
-cd ORB_SLAM3_RGBD_DenseSlamReconstrction
+git clone --recurse-submodules https://github.com/ChengzheZhu/oms_slam_semantic_recon.git
+cd oms_slam_semantic_recon
 sudo bash install/install_dependencies.sh
 bash install/install_pangolin.sh
 bash install/build_orbslam3.sh
 cd external/orbslam3/Vocabulary && tar -xf ORBvoc.txt.tar.gz && cd -
 bash install/setup_env.sh          # creates slam_recon env + installs SAM3
 conda activate slam_recon
-bash run_quick_test_pipeline.sh /path/to/recording.bag
+bash run_pipeline.sh               # edit dataset paths in the NN_*.sh first
 ```
 
 ## Bag files
-- RealSense D456, RGB-D only (no confidence stream in current recordings)
-- Location on server: `~/cloud/cheng-3dcv/OMS/2/rs_bags/`
-- Bags are large (2–8 GB) on a network mount — run locally for stride=1 tests
+- RealSense D456, RGB-D (no confidence stream in current recordings)
+- Bags are large (2–8 GB); run locally for stride=1 tests
 
 ## Data layout
-Output written to `output/<run_name>/` (gitignored):
+Output written to `output/<run>/` (gitignored):
 ```
-output/gamma_0.5/
+output/<run>/
   sparse/
     CameraTrajectory.txt          — ORB-SLAM3 TUM poses
-    trajectory_open3d.log         — Open3D camera log
-  raw_mesh_rgb.ply                — Pass 1 TSDF mesh (original RGB)
-  score_map_mesh.ply              — alpha score visualisation (blue→red)
-  alpha_maps/                     — L2 EDT cache (per gamma)
-  thresh_0.3/
-    culled_mesh_rgb.ply           — RGB mesh with seam triangles removed
-    segments.ply                  — pseudo-colour segment patches (optional)
-    sam3_segments/segment_*.ply   — individual stone submeshes (optional)
-  thresh_0.5/
-    ...
-  debug.glb                       — mesh + camera frustums for geometry inspection
+    trajectory_open3d.log         — Open3D camera log (used by 03 / 05)
+  raw_mesh_rgb.ply                — stage 03 geometry mesh
+  scoring/
+    alpha_maps/alpha_*.npz        — L2 EDT cache
+    alpha_mesh.ply                — stage 05 semantic mesh
+    alpha_batches/                — batched track (05b)
+  batches/                        — batched track (03b)
+  segments/                       — stage 06 culled mesh + per-stone submeshes
 ```
 
-## Tunable parameters (run_03d.sh)
-| Variable | Typical | Effect |
-|----------|---------|--------|
-| `EDT_GAMMA` | 0.3–0.7 | Score falloff shape; lower = sharper seams |
-| `ALPHA_THRESHOLDS` | `"0.2 0.3 0.5"` | Seam cutoff sweep; each → thresh_<t>/ |
-| `VOXEL_SIZE` | 0.005 m | TSDF resolution; smaller = finer but slower |
-| `MESH_KEEP_COMPONENTS` | 1 | Drop floating fragments before scoring |
-| `MIN_CLUSTER_SIZE` | 1000 | Minimum triangles to keep a segment |
-| `SKIP_SEGMENTS` | true | Skip segmentation; only save culled mesh |
-
-## Pending tasks
-- [ ] Re-enable GPU TSDF when Open3D VoxelBlockGrid API stabilises
-- [ ] Wire `04_export_point_clouds.py` into `run_full_pipeline.sh`
-- [ ] Server config: FRAME_STRIDE=3, VOXEL_SIZE=0.002 (wall motion is slower)
+## Tunable parameters
+Live in the stage wrapper config blocks (edit at the top of each `NN_*.sh`):
+| Where | Variable | Effect |
+|-------|----------|--------|
+| 05 | `EDT_GAMMA` | Score falloff; lower = sharper seams |
+| 05 | `SAM_MAX_SIZE_RATIO` | Max mask size fraction kept |
+| 03/05 | `VOXEL_SIZE` | TSDF resolution (m); smaller = finer/slower |
+| 06 | `ALPHA_THRESHOLDS` | Seam cutoff sweep |
+| 06 | `MESH_KEEP_COMPONENTS` | Keep N largest components |
+| 06 | `MIN_CLUSTER_SIZE` | Min triangles per saved segment |
+| 03b/05b | `BATCH_SIZE`,`BATCH_OVERLAP` | Batched-track chunking (must match across 03b & 05b) |

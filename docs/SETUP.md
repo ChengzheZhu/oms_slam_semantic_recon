@@ -1,172 +1,94 @@
 # Setup Guide
 
-This guide will help you set up the ORB_SLAM3 + Open3D dense reconstruction pipeline.
+Full install for the SLAM semantic reconstruction pipeline: system libraries,
+ORB-SLAM3 build, and the `slam_recon` conda environment (Python 3.11, PyTorch
+2.7 + cu126, Open3D 0.19, SAM3).
 
-## Prerequisites
+Tested on Ubuntu 20.04+. GPU recommended (SAM3 inference + Open3D).
 
-- Ubuntu 20.04+ or similar Linux distribution
-- Python 3.8+
-- Conda (recommended) or system Python
-- Git
-
-## Step 1: Clone the Repository
+## 1. Clone with submodules
 
 ```bash
-git clone <your-repo-url>
-cd ORB_SLAM3_RGBD_DenseSlamReconstrction
-
-# Initialize and update git submodules (IMPORTANT!)
+git clone --recurse-submodules https://github.com/ChengzheZhu/oms_slam_semantic_recon.git
+cd oms_slam_semantic_recon
+# If you already cloned without --recurse-submodules:
 git submodule update --init --recursive
 ```
 
-**Important:** The ORB_SLAM3 library is included as a git submodule. You must run `git submodule update --init --recursive` to download it.
+Submodules: `external/orbslam3` (ORB-SLAM3 fork) and `external/sam3` (SAM3 fork,
+separate from the components repo's SAM3).
 
-## Step 2: Install System Dependencies
+## 2. System dependencies
 
 ```bash
-# Install build tools
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git
-
-# Install required libraries
-sudo apt-get install -y \
-    libeigen3-dev \
-    libssl-dev \
-    libusb-1.0-0-dev \
-    pkg-config \
-    libgtk-3-dev \
-    libglfw3-dev \
-    libgl1-mesa-dev \
-    libglu1-mesa-dev
-
-# Install RealSense SDK
-sudo apt-get install -y librealsense2-dev librealsense2-utils
+sudo bash install/install_dependencies.sh
 ```
 
-Alternatively, use the automated installation script:
+Installs build tools + Eigen, OpenCV, RealSense SDK (`librealsense2`), GTK/GL libs.
+
+## 3. Pangolin (ORB-SLAM3 viewer)
 
 ```bash
-./install/install_dependencies.sh
+bash install/install_pangolin.sh
 ```
 
-## Step 3: Set Up Python Environment
-
-### Option A: Using Conda (Recommended)
+## 4. Build ORB-SLAM3
 
 ```bash
-# Create conda environment
-conda create -n rs_open3d python=3.9
-conda activate rs_open3d
-
-# Install Python dependencies
-pip install -r requirements.txt
+bash install/build_orbslam3.sh
 ```
 
-### Option B: Using System Python
+Builds the third-party libs (DBoW2, g2o, Sophus), the core library, and the RGB-D
+example binary at `external/orbslam3/Examples/RGB-D/rgbd_tum`. The viewer is a
+**runtime flag** (5th argv: `0` headless, `1` Pangolin) — no recompile to switch.
+
+## 5. ORB vocabulary
 
 ```bash
-pip install --user -r requirements.txt
+cd external/orbslam3/Vocabulary && tar -xf ORBvoc.txt.tar.gz && cd -
 ```
 
-## Step 4: Install Pangolin
+The vocabulary is large and not tracked in git; extract it before the first SLAM run.
 
-Pangolin is required for ORB_SLAM3 visualization:
+## 6. Python environment
 
 ```bash
-./scripts/install_pangolin.sh
+bash install/setup_env.sh          # creates the slam_recon env + installs SAM3 editable
+conda activate slam_recon
 ```
 
-## Step 5: Build ORB_SLAM3
+`install/setup_env.sh` builds the env from `environment.yml` and `pip install -e`s
+SAM3 from `external/sam3`. Key version pins (already in `environment.yml`):
+- `opencv-python<4.10` — for `numpy<2` (SAM3 requires numpy<2)
+- `setuptools<71` — ≥72 drops the top-level `pkg_resources` module
+- `psutil` — SAM3 transitive dep (eagerly imported)
+
+## 7. Verify
 
 ```bash
-# Make sure you're in the conda environment (if using conda)
-conda activate rs_open3d
-
-# Build ORB_SLAM3
-./scripts/build_orbslam3.sh
-```
-
-This will:
-1. Build ORB_SLAM3 third-party libraries (DBoW2, g2o, Sophus)
-2. Build the ORB_SLAM3 core library
-3. Build RGB-D examples
-
-## Step 6: Download ORB Vocabulary
-
-Download the ORB vocabulary file (required for ORB_SLAM3):
-
-```bash
-cd external/orbslam3/Vocabulary
-wget https://github.com/UZ-SLAMLab/ORB_SLAM3/releases/download/v1.0-release/ORBvoc.txt.tar.gz
-tar -xf ORBvoc.txt.tar.gz
-rm ORBvoc.txt.tar.gz
-cd ../../..
-```
-
-## Step 7: Verify Installation
-
-Check that all components are properly installed:
-
-```bash
-# Check ORB_SLAM3 library
-ls -lh external/orbslam3/lib/libORB_SLAM3.so
-
-# Check ORB_SLAM3 executable
+conda activate slam_recon
+# ORB-SLAM3 binary + vocabulary present
 ls -lh external/orbslam3/Examples/RGB-D/rgbd_tum
-
-# Check vocabulary file
 ls -lh external/orbslam3/Vocabulary/ORBvoc.txt
+# Python stack
+python -c "import open3d, numpy, cv2, torch, pyrealsense2; \
+print('open3d', open3d.__version__, '| torch', torch.__version__, '| cuda', torch.cuda.is_available())"
+```
 
-# Test Python environment
-python -c "import open3d; import numpy; import cv2; import pyrealsense2; print('All Python packages OK')"
+Then run the pipeline (see the [README](../README.md)):
+```bash
+bash run_pipeline.sh
 ```
 
 ## Troubleshooting
 
-### Git Submodule Issues
-
-If you cloned the repository without `--recursive` or the submodule is empty:
-
-```bash
-git submodule update --init --recursive
-```
-
-### ORB_SLAM3 Build Fails
-
-1. Make sure you've activated the conda environment:
-   ```bash
-   conda activate rs_open3d
-   ```
-
-2. Check OpenCV installation:
-   ```bash
-   python -c "import cv2; print(cv2.__version__)"
-   ```
-
-3. Rebuild with verbose output:
-   ```bash
-   cd external/orbslam3
-   rm -rf build
-   mkdir build && cd build
-   cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3" -DBUILD_EXAMPLES=ON
-   make -j$(nproc) VERBOSE=1
-   ```
-
-### Pangolin Issues
-
-If Pangolin libraries are not found:
-
-```bash
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-```
-
-Add this to your `~/.bashrc` to make it permanent:
-
-```bash
-echo 'export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## Next Steps
-
-After successful installation, proceed to the [Usage Guide](USAGE.md) to learn how to run the pipeline.
+- **NumPy 2 conflict** (`numpy.core.multiarray failed to import`): SAM3/Open3D need
+  `numpy<2` — `pip install "numpy<2" --force-reinstall` in the `slam_recon` env.
+- **CUDA not available**: check `nvidia-smi` / `nvcc --version`; reinstall torch with
+  `--index-url https://download.pytorch.org/whl/cu126`.
+- **ORB-SLAM3 build fails**: rebuild verbose —
+  `cd external/orbslam3 && rm -rf build && mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON && make -j$(nproc) VERBOSE=1`.
+- **Pangolin libs not found**: `export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH`
+  (add to `~/.bashrc` to persist).
+- **Open3D GUI over SSH**: use headless rendering (`OPEN3D_HEADLESS=1`) or run stages
+  with the `--headless` flag where available.

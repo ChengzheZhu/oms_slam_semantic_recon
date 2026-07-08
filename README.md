@@ -1,122 +1,103 @@
-# ORB_SLAM3 + Open3D Dense Reconstruction Pipeline
+# OMS — SLAM Semantic Reconstruction (assembly)
 
-A complete pipeline for RGB-D SLAM and dense 3D reconstruction from RealSense bag files.
+RGB-D SLAM + semantic segmentation of a dry-stacked stone **wall (the assembly)**.
+ORB-SLAM3 tracks the camera, Open3D fuses depth into a dense TSDF mesh, and SAM3
+EDT alpha-scoring separates individual stone interiors from the seams between them.
 
-## Features
+Sub-project **2 of 3** in the OMS stone-wall pipeline:
+1. **Components** (`oms_monocular_semantic_recon`) — per-stone reconstruction (MASt3R/VGGT + SAM3)
+2. **Assembly** *(this repo)* — SLAM + semantic segmentation of the whole wall
+3. **Registration** *(future)* — geometry-based matching of stones into the assembly
 
-- **Sparse SLAM**: ORB_SLAM3 for robust camera trajectory estimation
-- **Dense Reconstruction**: Open3D TSDF-based mesh generation
-- **Flexible Configuration**: YAML-based configuration system
-- **Batch Processing**: Process multiple datasets with headless mode
-- **Interactive Visualization**: Real-time SLAM tracking visualization
+Input: a RealSense D456 `.bag`. Output: a segmented assembly mesh (per-stone submeshes + seams culled).
+
+## Pipeline
+
+Six stages. Each stage is a root wrapper script `NN_*.sh` (edit its config block) over
+`scripts/NN_*.py`. `run_pipeline.sh` runs the non-batched track end to end.
+
+| # | Run | Does |
+|---|-----|------|
+| 01 | `01_extract.sh` | `.bag` → `color/`, `depth/`, `confidence/`, `intrinsic.json`, `timestamps.txt`, `streams.json` |
+| 02 | `02_slam.sh` | ORB-SLAM3 RGB-D tracking + trajectory conversion → `trajectory_open3d.log` (+ pose-graph JSON) |
+| 03 | `03_tsdf_rgb.sh` | TSDF-fuse all frames → `raw_mesh_rgb.ply` (geometry) |
+| 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + QR prompts (one shared image encode); QR-hole recovery |
+| 05 | `05_sam3_score_fusion.sh` | **L2**: per-frame EDT alpha maps → semantic TSDF → `alpha_mesh.ply` |
+| 06 | `06_cull_segment.sh` | transfer alpha scores to the RGB mesh, cull seam triangles, segment into stone submeshes |
+
+**Two tracks:**
+- **Non-batched** (`03 → 05 → 06`) — single TSDF volume; fits in memory. Orchestrated by `run_pipeline.sh`.
+- **Batched** (`03b → 05b → 06b`) — for large / high-res (2 mm voxel) scenes: overlapping temporal
+  batches kept as separate meshes. `batch_size` / `batch_overlap` **must match** between `03b` and `05b`.
+  Stages `01/02/04` are shared. See [`docs/0421_dev_notes.md`](docs/0421_dev_notes.md) for the rationale.
+
+## Quick start
+
+```bash
+conda activate slam_recon
+
+# Full non-batched pipeline (edit dataset paths at the top of each NN_*.sh first)
+bash run_pipeline.sh              # all stages 01–06
+bash run_pipeline.sh 3 6          # stages 03 through 06 only
+
+# Or run a single stage
+bash 04_sam3_mask.sh
+```
 
 ## Installation
 
-### Clone with Submodules
-
-This project uses ORB_SLAM3 as a git submodule. Clone with:
+See [`docs/SETUP.md`](docs/SETUP.md) for the full guide. In short:
 
 ```bash
-git clone --recursive <your-repo-url>
-cd ORB_SLAM3_RGBD_DenseSlamReconstrction
+git clone --recurse-submodules https://github.com/ChengzheZhu/oms_slam_semantic_recon.git
+cd oms_slam_semantic_recon
+
+sudo bash install/install_dependencies.sh   # system libs
+bash install/install_pangolin.sh            # Pangolin (ORB-SLAM3 viewer)
+bash install/build_orbslam3.sh              # build ORB-SLAM3 → Examples/RGB-D/rgbd_tum
+cd external/orbslam3/Vocabulary && tar -xf ORBvoc.txt.tar.gz && cd -   # ORB vocabulary
+bash install/setup_env.sh                   # create slam_recon env + install SAM3 (external/sam3)
 ```
 
-Or if you already cloned without `--recursive`:
+- **Env:** `slam_recon` (Python 3.11, PyTorch 2.7 + cu126, Open3D 0.19) — spec in `environment.yml`.
+- **Submodules:** `external/orbslam3` (ORB-SLAM3 fork), `external/sam3` (SAM3 fork — separate from the components repo).
+- **ORB-SLAM3 viewer** is a runtime flag (5th argv: `0` headless, `1` Pangolin) — no recompile to switch.
 
-```bash
-git submodule update --init --recursive
+## Repository layout
+
+```
+01_extract.sh … 06_cull_segment.sh   stage wrappers (+ 03b/05b/06b batched variants)
+run_pipeline.sh                       orchestrator (non-batched track)
+scripts/NN_*.py                       stage implementations
+config/
+  camera/RealSense_D456.yaml          camera intrinsics for ORB-SLAM3
+  orbslam/                            ORB-SLAM3 configs
+  pipeline/default.yaml               pipeline defaults
+install/                              dependency / Pangolin / ORB-SLAM3 build + env setup
+external/  orbslam3, sam3             git submodules
+docs/                                 setup + feature guides
+output/<run>/                         gitignored results (meshes, scoring, segments)
 ```
 
-### Build
+## Output layout
 
-```bash
-# 1. Install system dependencies
-./install/install_dependencies.sh
-
-# 2. Set up Python environment
-conda create -n rs_open3d python=3.9
-conda activate rs_open3d
-pip install -r requirements.txt
-
-# 3. Install Pangolin (for ORB_SLAM3 visualization)
-./scripts/install_pangolin.sh
-
-# 4. Build ORB_SLAM3
-./scripts/build_orbslam3.sh
-
-# 5. Download ORB vocabulary
-cd external/orbslam3/Vocabulary
-wget https://github.com/UZ-SLAMLab/ORB_SLAM3/releases/download/v1.0-release/ORBvoc.txt.tar.gz
-tar -xf ORBvoc.txt.tar.gz
-cd ../../..
 ```
-
-## Quick Start
-
-```bash
-# Activate environment
-conda activate rs_open3d
-
-# Run complete pipeline (extract frames from bag, run SLAM, generate mesh)
-./bin/run_pipeline.py --bag /path/to/your/file.bag --extract
+output/<run>/
+  sparse/
+    CameraTrajectory.txt        ORB-SLAM3 TUM poses
+    trajectory_open3d.log       Open3D camera log (used by 03 / 05)
+  raw_mesh_rgb.ply              stage 03 geometry mesh
+  scoring/
+    alpha_maps/alpha_*.npz      L2 EDT cache
+    alpha_mesh.ply              stage 05 semantic mesh (grey = EDT score)
+  segments/                     stage 06 culled mesh + per-stone submeshes
 ```
 
 ## Documentation
-
-- [Installation Guide](docs/SETUP.md) - Detailed setup instructions
-- [Usage Guide](docs/USAGE.md) - How to use the pipeline
-- [Quick Start](docs/QUICK_START.md) - Get started quickly
-- [Viewer Toggle](docs/VIEWER_TOGGLE.md) - Interactive vs batch mode
-
-## Directory Structure
-
-```
-ORB_SLAM3_RGBD_DenseSlamReconstrction/
-├── bin/                  # Executable scripts
-│   └── run_pipeline.py   # Master pipeline script
-├── scripts/              # Pipeline scripts
-│   ├── 00_extract_frames.py
-│   ├── 01_run_orbslam3.sh
-│   ├── 02_convert_trajectory.py
-│   └── 03_dense_reconstruction.py
-├── config/               # Configuration files
-│   ├── camera/           # Camera configs (ORB_SLAM3)
-│   └── pipeline/         # Pipeline configs (YAML)
-├── external/             # External dependencies
-│   └── orbslam3/         # ORB_SLAM3 (git submodule)
-├── install/              # Installation scripts
-├── docs/                 # Documentation
-├── output/               # Output directory
-│   ├── sparse/           # SLAM trajectories
-│   └── dense/            # 3D meshes
-└── tests/                # Unit tests
-```
-
-## Requirements
-
-- Ubuntu 20.04+ or similar Linux distribution
-- Python 3.8+
-- RealSense D400 series camera (for data collection)
-- 8GB+ RAM recommended
-- GPU recommended (for Open3D visualization)
-
-## How It Works
-
-1. **Frame Extraction**: Extract RGB-D frames from RealSense bag files
-2. **SLAM Tracking**: ORB_SLAM3 estimates camera trajectory from RGB-D frames
-3. **Trajectory Conversion**: Convert ORB_SLAM3 output to Open3D format
-4. **Dense Integration**: TSDF-based volumetric integration to create dense mesh
-
-## Configuration
-
-Edit `config/pipeline/default.yaml` to customize:
-
-- Dataset paths
-- Frame extraction settings (stride, max frames)
-- ORB_SLAM3 parameters
-- Dense reconstruction settings (voxel size, depth range)
-- Viewer mode (interactive vs headless)
+- [Setup guide](docs/SETUP.md) — install, build, environment
+- [Segmented reconstruction](docs/SEGMENTED_RECONSTRUCTION.md) · [Boundary segmentation logic](docs/boundary_segmentation_explanation.md)
+- [Point-cloud export](docs/POINT_CLOUD_EXPORT.md) · [Viewer toggle](docs/VIEWER_TOGGLE.md) · [Bag trimming](docs/BAG_TRIMMING_GUIDE.md)
+- [`CLAUDE.md`](CLAUDE.md) — design decisions, cache layers, tunable parameters
 
 ## License
-
-See LICENSE file.
+See `LICENSE` if present; otherwise all rights reserved pending a license choice.
