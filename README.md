@@ -29,7 +29,7 @@ Six stages. Each stage is a root wrapper script `NN_*.sh` (edit its config block
 - **Non-batched** (`03 → 05 → 06`) — single TSDF volume; fits in memory. Orchestrated by `run_pipeline.sh`.
 - **Batched** (`03b → 05b → 06b`) — for large / high-res (2 mm voxel) scenes: overlapping temporal
   batches kept as separate meshes. `batch_size` / `batch_overlap` **must match** between `03b` and `05b`.
-  Stages `01/02/04` are shared. See [`docs/0421_dev_notes.md`](docs/0421_dev_notes.md) for the rationale.
+  Stages `01/02/04` are shared. See [`docs/drafts/0421_dev_notes.md`](docs/drafts/0421_dev_notes.md) for the rationale.
 
 ## Quick start
 

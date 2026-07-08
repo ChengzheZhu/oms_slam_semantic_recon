@@ -26,7 +26,7 @@ Each stage = a root wrapper `NN_*.sh` (edit its config block) → `scripts/NN_*.
 - **Non-batched** (`03 → 05 → 06`): single TSDF volume; orchestrated by `run_pipeline.sh`.
 - **Batched** (`03b → 05b → 06b`): overlapping temporal batches kept as separate meshes for
   large / high-res (2 mm voxel) scenes; `batch_size`/`batch_overlap` **must match** across 03b & 05b.
-  Stages 01/02/04 are shared. Rationale: `docs/0421_dev_notes.md`.
+  Stages 01/02/04 are shared. Rationale: `docs/drafts/0421_dev_notes.md`.
 
 **Naming quirk:** step 5's non-batched wrapper is `05_sam3_score_fusion.sh` (calls
 `05_sam3_score.py`) — the `_fusion` suffix is inconsistent with the 03/04/06 wrappers.
@@ -54,7 +54,7 @@ oms_slam_semantic_recon/
     orbslam3/                    — git submodule: ChengzheZhu/ORB_SLAM3.git
     sam3/                        — git submodule: ChengzheZhu/sam3.git (separate from components repo)
   environment.yml                — conda env spec (slam_recon, Python 3.11)
-  docs/                          — SETUP.md + feature guides + 0421_dev_notes.md
+  docs/                          — SETUP.md + feature guides; docs/drafts/ = working notes
 ```
 
 ## Environment
@@ -116,7 +116,7 @@ Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips E
 - **EDT gamma**: `(dist/max_dist)**gamma`; gamma<1 sharpens seams, =1 linear, >1 conservative
 - **CPU TSDF**: `ScalableTSDFVolume` (Open3D legacy API); GPU `VoxelBlockGrid` disabled (v0.19 device issues)
 - **Batched track**: keeps TSDF batches as separate PLYs to hit 2 mm voxel within ~30 GB RAM;
-  scoring + culling operate on one batch mesh at a time (see `docs/0421_dev_notes.md`)
+  scoring + culling operate on one batch mesh at a time (see `docs/drafts/0421_dev_notes.md`)
 - **QR-hole recovery** (step 04): QR markers on stones read as holes in the stone mask; a ring
   dilation check merges an enclosed QR's pixels back into the covering stone mask
 - **Frames stored outside repo**: extracted frames go beside the bag file

@@ -200,28 +200,16 @@ o3d.visualization.draw_geometries([mesh, boundaries])
 This lets you see where boundaries were detected and verify they align with actual stone edges.
 
 
-  python scripts/03d_sam3_boundary_reconstruction.py \
-    --frames_dir /home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516 \
-    --intrinsic /home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516/intrinsic.json \
-    --trajectory output/sam3/sparse/trajectory_open3d.log \
-    --output output/sam3/sam3_boundary_test.ply \
-    --segments_dir output/sam3/sam3_boundary_test_segments \
-    --sam_prompt "individual stone" \
-    --sam_confidence 0.1 \
-    --frame_subsample 5 \
-    --voxel_size 0.01
+The monolithic `03d_sam3_boundary_reconstruction.py` has been split across the
+numbered pipeline stages (04 SAM3 masks → 05 EDT alpha + semantic TSDF → 06 cull +
+segment). Run them via the orchestrator or per stage:
 
+```bash
+# stages 04–06 (masks → scoring → cull/segment)
+bash run_pipeline.sh 4 6
 
-      python scripts/03d_sam3_boundary_reconstruction.py \
-    --frames_dir /home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516 \
-    --intrinsic /home/chengzhe/Data/OMS_data3/rs_bags/1101/20251101_235516/intrinsic.json \
-    --trajectory output/sucess/sparse/trajectory_open3d.log \
-    --output output/sam3/sam3_boundary_test.ply \
-    --segments_dir output/sam3/sam3_boundary_test_segments \
-    --sam_prompt "individual stone" \
-    --sam_confidence 0.1 \
-    --sam_max_size_ratio 0.15 \
-    --frame_subsample 5 \
-    --voxel_size 0.01 \
-    --boundary_threshold 0.015 \
-    --min_cluster_size 200
+# or per stage — edit the config block at the top of each first
+bash 04_sam3_mask.sh          # sam_prompt, sam_confidence, QR recovery
+bash 05_sam3_score_fusion.sh  # edt_gamma, sam_max_size_ratio, voxel_size
+bash 06_cull_segment.sh       # alpha_thresholds, min_cluster_size
+```

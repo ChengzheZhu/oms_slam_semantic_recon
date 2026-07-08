@@ -198,9 +198,9 @@ python scripts/trim_bag.py \
 
 ### Preview window doesn't open
 
-Make sure you're in the `sam3_open3d` environment:
+Make sure you're in the `slam_recon` environment:
 ```bash
-conda activate sam3_open3d
+conda activate slam_recon
 ```
 
 ### "rs-convert not available"
