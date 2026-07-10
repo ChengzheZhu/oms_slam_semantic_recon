@@ -19,7 +19,7 @@ Each stage = a root wrapper `NN_*.sh` (edit its config block) → `scripts/NN_*.
 | 02 | `02_slam.sh` → `02_slam.py` | ORB-SLAM3 RGB-D tracking **and** TUM→Open3D trajectory conversion → trajectory_open3d.log (+ pose-graph JSON) |
 | 03 | `03_tsdf_rgb.sh` → `03_tsdf_rgb.py` | TSDF-fuse all frames → raw_mesh_rgb.ply (geometry only) |
 | 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + QR); QR-hole recovery |
-| 05 | `05_sam3_score_fusion.sh` → `05_sam3_score.py` | **L2**: per-frame EDT alpha maps → semantic TSDF → alpha_maps/*.npz + alpha_mesh.ply |
+| 05 | `05_sam3_score.sh` → `05_sam3_score.py` | **L2**: per-frame EDT alpha maps → semantic TSDF → alpha_maps/*.npz + alpha_mesh.ply |
 | 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer alpha→raw mesh, cull seam triangles, segment into stone submeshes |
 
 **Two tracks:**
@@ -28,16 +28,11 @@ Each stage = a root wrapper `NN_*.sh` (edit its config block) → `scripts/NN_*.
   large / high-res (2 mm voxel) scenes; `batch_size`/`batch_overlap` **must match** across 03b & 05b.
   Stages 01/02/04 are shared. Rationale: `docs/drafts/0421_dev_notes.md`.
 
-**Naming quirk:** step 5's non-batched wrapper is `05_sam3_score_fusion.sh` (calls
-`05_sam3_score.py`) — the `_fusion` suffix is inconsistent with the 03/04/06 wrappers.
-Left as-is pending the deferred file-layout restructure. The old plain `05_sam3_score.sh`
-was removed; `run_pipeline.sh` calls the fusion wrapper.
-
 ## Repo layout
 ```
 oms_slam_semantic_recon/
   01_extract.sh 02_slam.sh 03_tsdf_rgb.sh 04_sam3_mask.sh
-  05_sam3_score_fusion.sh 06_cull_segment.sh     — stage wrappers
+  05_sam3_score.sh 06_cull_segment.sh     — stage wrappers
   03b_tsdf_rgb_batched.sh 05b_sam3_score_batched.sh 06b_cull_segment_batched.sh — batched variants
   run_pipeline.sh                                — orchestrator (non-batched)
   scripts/NN_*.py                                — stage implementations

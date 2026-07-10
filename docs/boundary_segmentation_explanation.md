@@ -210,6 +210,6 @@ bash run_pipeline.sh 4 6
 
 # or per stage — edit the config block at the top of each first
 bash 04_sam3_mask.sh          # sam_prompt, sam_confidence, QR recovery
-bash 05_sam3_score_fusion.sh  # edt_gamma, sam_max_size_ratio, voxel_size
+bash 05_sam3_score.sh         # edt_gamma, sam_max_size_ratio, voxel_size
 bash 06_cull_segment.sh       # alpha_thresholds, min_cluster_size
 ```

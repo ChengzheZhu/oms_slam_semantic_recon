@@ -22,7 +22,7 @@ Six stages. Each stage is a root wrapper script `NN_*.sh` (edit its config block
 | 02 | `02_slam.sh` | ORB-SLAM3 RGB-D tracking + trajectory conversion → `trajectory_open3d.log` (+ pose-graph JSON) |
 | 03 | `03_tsdf_rgb.sh` | TSDF-fuse all frames → `raw_mesh_rgb.ply` (geometry) |
 | 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + QR prompts (one shared image encode); QR-hole recovery |
-| 05 | `05_sam3_score_fusion.sh` | **L2**: per-frame EDT alpha maps → semantic TSDF → `alpha_mesh.ply` |
+| 05 | `05_sam3_score.sh` | **L2**: per-frame EDT alpha maps → semantic TSDF → `alpha_mesh.ply` |
 | 06 | `06_cull_segment.sh` | transfer alpha scores to the RGB mesh, cull seam triangles, segment into stone submeshes |
 
 **Two tracks:**

@@ -30,115 +30,14 @@ import argparse
 import numpy as np
 import open3d as o3d
 from tqdm import tqdm
-from PIL import Image
-from scipy import ndimage
-from concurrent.futures import ThreadPoolExecutor
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers (identical to 05_sam3_score.py)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_trajectory_log(log_file):
-    poses = []
-    with open(log_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            vals = [float(x) for x in line.split()]
-            if len(vals) == 16:
-                poses.append(np.array(vals).reshape(4, 4))
-    return poses
-
-
-def load_intrinsic(intrinsic_file):
-    with open(intrinsic_file) as f:
-        d = json.load(f)
-    m = d['intrinsic_matrix']
-    intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        width=d['width'], height=d['height'],
-        fx=m[0], fy=m[4], cx=m[6], cy=m[7])
-    return intrinsic, d.get('depth_scale', 1000.0)
-
-
-def get_rgbd_file_lists(frames_dir):
-    color_dir = os.path.join(frames_dir, 'color')
-    depth_dir = os.path.join(frames_dir, 'depth')
-    color_files = sorted(os.path.join(color_dir, f) for f in os.listdir(color_dir)
-                         if f.endswith(('.jpg', '.png')))
-    depth_files = sorted(os.path.join(depth_dir, f) for f in os.listdir(depth_dir)
-                         if f.endswith('.png'))
-    return color_files, depth_files
-
-
-def apply_depth_filter(depth_np, depth_scale, min_depth_m=0.15):
-    min_raw = int(min_depth_m * depth_scale)
-    invalid = (depth_np == 0) | (depth_np < min_raw)
-    if invalid.any():
-        depth_np = depth_np.copy()
-        depth_np[invalid] = 0
-    return depth_np
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# L1 mask cache + EDT alpha computation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_mask_cache(cache_path):
-    if not os.path.exists(cache_path):
-        raise FileNotFoundError(
-            f"L1 mask cache not found: {cache_path}\n"
-            "Run step 04 first, or check --mask_cache_dir.")
-    data = np.load(cache_path)
-    return data['masks'].astype(bool), data['scores'].astype(np.float32)
-
-
-def generate_alpha_frame(image_path, cache_path, max_size_ratio, edt_gamma):
-    masks_bool, _ = load_mask_cache(cache_path)
-    if masks_bool.shape[0] == 0:
-        img = Image.open(image_path)
-        return np.zeros((img.size[1], img.size[0]), dtype=np.float32)
-    h, w     = masks_bool.shape[1], masks_bool.shape[2]
-    alpha    = np.zeros((h, w), dtype=np.float32)
-    img_area = h * w
-    for mask in masks_bool:
-        if mask.sum() / img_area > max_size_ratio:
-            continue
-        dist  = ndimage.distance_transform_edt(mask).astype(np.float32)
-        max_d = dist.max()
-        score = (dist / max_d) ** edt_gamma if max_d > 0 else mask.astype(np.float32)
-        alpha = np.maximum(alpha, score)
-    return alpha
-
-
-def precompute_alphas(cache_dir, alpha_dir, color_files, n_frames,
-                      sam_max_size_ratio, edt_gamma):
-    os.makedirs(alpha_dir, exist_ok=True)
-    n_done = sum(1 for i in range(n_frames)
-                 if os.path.exists(os.path.join(alpha_dir, f"alpha_{i:06d}.npz")))
-    if n_done == n_frames:
-        print(f"  Alpha maps already complete ({n_done}/{n_frames}) — skipping")
-        return
-    n_workers = max((os.cpu_count() or 4) - 4, 1)
-    print(f"  Pre-computing alpha maps: {n_frames} frames  EDT ×{n_workers} thread(s)")
-
-    def worker(idx):
-        alpha_path = os.path.join(alpha_dir, f"alpha_{idx:06d}.npz")
-        if os.path.exists(alpha_path):
-            return
-        cache_path = os.path.join(cache_dir, f"masks_{idx:06d}.npz")
-        alpha = generate_alpha_frame(
-            color_files[idx],
-            cache_path=cache_path,
-            max_size_ratio=sam_max_size_ratio,
-            edt_gamma=edt_gamma)
-        np.savez_compressed(alpha_path, alpha=alpha)
-
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        list(tqdm(pool.map(worker, range(n_frames)),
-                  total=n_frames, desc="EDT alpha maps"))
-    print(f"  ✓ Alpha maps → {alpha_dir}")
+from pipeline_common import (
+    apply_depth_filter,
+    get_rgbd_file_lists,
+    load_intrinsic,
+    load_trajectory_log,
+)
+from alpha_common import precompute_alphas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
