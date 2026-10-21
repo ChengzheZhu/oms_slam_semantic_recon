@@ -222,6 +222,9 @@ Preprocess.CLAHE: {clahe}
 Preprocess.CLAHEClipLimit: {clahe_clip_limit}
 Preprocess.CLAHETileGrid: {clahe_tile_grid}
 
+# Fork-only key: wait for mapping threads + global BA before saving the atlas.
+System.ShutdownWaitSeconds: {shutdown_wait_s}
+
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1.0
 Viewer.GraphLineWidth: 0.9
@@ -255,7 +258,8 @@ def build_orbslam_settings(intrinsic_file, args):
         n_levels=args.orb_n_levels, ini_th_fast=args.orb_ini_th_fast,
         min_th_fast=args.orb_min_th_fast,
         clahe=int(args.equalize), clahe_clip_limit=args.clahe_clip_limit,
-        clahe_tile_grid=args.clahe_tile_grid)
+        clahe_tile_grid=args.clahe_tile_grid,
+        shutdown_wait_s=float(args.shutdown_wait_s))
     if args.save_atlas:
         text += f'\nSystem.SaveAtlasToFile: "{args.save_atlas}"\n'
     if args.load_atlas:
@@ -285,6 +289,9 @@ def main():
     parser.add_argument('--fps',         type=float, default=30.0,
                         help='Frame rate after stride; ORB-SLAM3 max frames between '
                              'keyframes. Playback is paced by real timestamps.')
+    parser.add_argument('--shutdown_wait_s', type=float, default=600.0,
+                        help='Max seconds to wait for mapping threads + global BA '
+                             'before saving (0 = save immediately)')
     parser.add_argument('--orb_n_features',  type=int,   default=4000)
     parser.add_argument('--orb_scale_factor', type=float, default=1.2)
     parser.add_argument('--orb_n_levels',    type=int,   default=8)

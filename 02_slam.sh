@@ -25,6 +25,7 @@ python "$PROJECT_DIR/scripts/02_slam.py" \
     --output_dir "$SPARSE_DIR"         \
     --vocab      "$SLAM_VOCAB"         \
     --fps        "$SLAM_FPS"           \
+    --shutdown_wait_s  "$SLAM_SHUTDOWN_WAIT_S"  \
     --clahe_clip_limit "$SLAM_CLAHE_CLIP_LIMIT" \
     --clahe_tile_grid  "$SLAM_CLAHE_TILE_GRID"  \
     --orb_n_features   "$ORBSLAM_N_FEATURES"   \

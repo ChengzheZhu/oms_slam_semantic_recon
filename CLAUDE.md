@@ -112,6 +112,18 @@ Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips E
   match the atlas camera fx + ORB pyramid + CLAHE (`Preprocess.*` keys, ignored by ORB-SLAM3).
   `Stereo.b` = 0.095 (D456 baseline) and `Camera.RGB` = 0 (imread gives BGR); before 2026-10-21
   these were 0.0387 and 1 (R/B grey weights swapped in the atlas)
+- **Shutdown waits for mapping** (fork branch `shutdown-wait`): `System::Shutdown()` drains local
+  mapping + loop closing and waits for a running global BA before saving the atlas, up to
+  `slam.shutdown_wait_s` (settings key `System.ShutdownWaitSeconds`; absent/0 = old behaviour).
+  Upstream saved immediately, so a GBA started near the end of a sequence was lost.
+- **Playback is real-time**: `rgbd_tum` sleeps to each frame's real timestamp gap (headless or
+  background alike); `slam.fps` does NOT change speed — it is ORB-SLAM3's max frames between KFs.
+- **Fork branch `shutdown-wait`** (off `66911af`) also fixes `SaveTrajectoryTUM` segfaulting after
+  tracking loss (null parent KF) and `LoadAtlas` failing on absolute paths. Fork `master` diverges:
+  it lowers relocalisation thresholds for all modes (50→20 PnP inliers) — not merged here.
+- **Known issue — trajectory index**: `CameraTrajectory.txt` omits lost frames and
+  `trajectory_open3d.log` has no frame index, while 03/05 fuse frame `i` with pose `i`. Any lost
+  frame shifts every later pose onto the wrong frame. Check `Number of poses` == frame count.
 - **Runtime viewer toggle**: `rgbd_tum.cc` accepts argv[5] (0=headless, 1=viewer)
 - **FRAME_STRIDE matters**: stride=1 (30 fps) is more reliable than stride=3 for tracking on fast motion
 - **EDT gamma**: `(dist/max_dist)**gamma`; gamma<1 sharpens seams, =1 linear, >1 conservative

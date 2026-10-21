@@ -41,6 +41,8 @@ slam:                   # step 02
   save_atlas: true      # save <run dir>/sparse/atlas.osa
   load_atlas: ""        # atlas path without .osa; "" = start fresh
   localize: false       # localization-only (needs load_atlas)
+  shutdown_wait_s: 600  # after the last frame, wait up to this long for local mapping,
+                        # loop closing and global BA before saving; 0 = save immediately
   vocab: external/orbslam3/Vocabulary/ORBvoc.txt
 
 orbslam:                # step 02 — ORB-SLAM3 settings; camera K comes from frames/intrinsic.json
