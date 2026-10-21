@@ -1,4 +1,4 @@
-# pipeline.yaml — global settings for every step script (01_*.sh … 06_*.sh).
+# pipeline.yaml — global settings for every step script (01_*.sh … 07_*.sh).
 #
 # Each key becomes a shell variable named SECTION_KEY (upper case), e.g.
 #   extract.stride  → EXTRACT_STRIDE      tsdf.voxel_size → TSDF_VOXEL_SIZE
@@ -18,9 +18,12 @@
 #     batches/             step 03b
 #     scoring/             step 05  alpha_maps/, alpha_mesh.ply  (05b: alpha_batches/)
 #     segments/            step 06 / 06b
+#     export/              step 07  cloud.ply, cameras.obj (for Rhino)
 
 paths:
-  bag: /home/chengzhe/Data/OMS_data3/rs_bags/20260127_015119.bag
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pc_long.bag
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pole_long.bag #big drifts do not use
+  bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pole_short.bag
   output_base: output
   run_name: ""          # "" = bag file name without .bag
   frames_dir: ""        # "" = <run dir>/frames; set to reuse frames elsewhere
@@ -37,7 +40,7 @@ slam:                   # step 02
   equalize: true        # CLAHE before SLAM (originals kept for TSDF); registration 02a follows it
   clahe_clip_limit: 2.0
   clahe_tile_grid: 8    # tiles per image side
-  viewer: false
+  viewer: true
   save_atlas: true      # save <run dir>/sparse/atlas.osa
   load_atlas: ""        # atlas path without .osa; "" = start fresh
   localize: false       # localization-only (needs load_atlas)
@@ -55,7 +58,7 @@ orbslam:                # step 02 — ORB-SLAM3 settings; camera K comes from fr
   stereo_b: 0.095       # D456 stereo baseline (m)
 
 tsdf:                   # steps 03, 03b, 05, 05b — keep RGB and alpha meshes consistent
-  voxel_size: 0.002     # metres
+  voxel_size: 0.005     # metres
   depth_max: 3.0        # metres
   depth_min: 0.15       # metres
   confidence_threshold: 0   # 03/03b only: 0=off, 1=drop zero-confidence, 2=high only
@@ -88,3 +91,11 @@ cull_batched:           # step 06b
   alpha_threshold: 0.5
   chunk_size: 500000    # vertices per KD-tree query chunk; lower if OOM
   save_score_maps: false
+
+export:                 # step 07 — cloud.ply (points) + cameras.obj (cones, trajectory) for Rhino
+  source: mesh          # mesh = step 03 raw_mesh_rgb.ply; batches = step 03b batches/*.ply
+  units: m              # m | cm | mm — files carry no units; match the Rhino document
+  voxel: 0              # point-cloud downsample, metres (0 = every TSDF surface point)
+  normals: false        # also write point normals (~45% larger cloud.ply)
+  cone_depth: 0.1      # cone length (camera centre to image plane), metres
+  cone_every: 30         # cone for every Nth posed frame; trajectory keeps all poses

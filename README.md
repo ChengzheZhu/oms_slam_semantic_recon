@@ -13,7 +13,7 @@ Input: a RealSense D456 `.bag`. Output: a segmented assembly mesh (per-stone sub
 
 ## Pipeline
 
-Six stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yaml`) over
+Seven stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yaml`) over
 `scripts/NN_*.py`. `run_pipeline.sh` runs the non-batched track end to end.
 
 | # | Run | Does |
@@ -24,6 +24,7 @@ Six stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yaml`
 | 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + QR prompts (one shared image encode); QR-hole recovery |
 | 05 | `05_sam3_score.sh` | **L2**: per-frame EDT alpha maps → semantic TSDF → `alpha_mesh.ply` |
 | 06 | `06_cull_segment.sh` | transfer alpha scores to the RGB mesh, cull seam triangles, segment into stone submeshes |
+| 07 | `07_export_rhino.sh` | export for Rhino: `cloud.ply` (TSDF surface points) + `cameras.obj` (camera cones, trajectory polyline); optional, not in `run_pipeline.sh` |
 
 **Two tracks:**
 - **Non-batched** (`03 → 05 → 06`) — single TSDF volume; fits in memory. Orchestrated by `run_pipeline.sh`.
@@ -82,7 +83,7 @@ bash install/setup_env.sh                   # create slam_recon env + install SA
 ## Repository layout
 
 ```
-01_extract.sh … 06_cull_segment.sh   stage wrappers (+ 03b/05b/06b batched variants)
+01_extract.sh … 07_export_rhino.sh   stage wrappers (+ 03b/05b/06b batched variants)
 run_pipeline.sh                       orchestrator (non-batched track)
 pipeline.yaml                         global settings: bag, output base, all stage params
 scripts/pipeline_env.sh               sourced by wrappers: loads pipeline.yaml, derives run paths
@@ -109,6 +110,7 @@ output/<run>/                         gitignored results (default paths.output_b
     alpha_maps/alpha_*.npz      L2 EDT cache
     alpha_mesh.ply              stage 05 semantic mesh (grey = EDT score)
   segments/                     stage 06 culled mesh + per-stone submeshes
+  export/                       stage 07 cloud.ply + cameras.obj (SLAM world frame, export.units)
 ```
 
 ## Documentation

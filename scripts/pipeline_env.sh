@@ -29,6 +29,7 @@ SLAM_VOCAB="$(abspath "$SLAM_VOCAB")"
 : "${RAW_MESH:=$RUN_DIR/raw_mesh_rgb.ply}"
 : "${SCORING_DIR:=$RUN_DIR/scoring}"
 : "${SEGMENTS_DIR:=$RUN_DIR/segments}"
+: "${EXPORT_DIR:=$RUN_DIR/export}"
 
 # Step 04 names its cache with Python's str(float), so normalise the same way.
 _conf="$(python -c "import sys; print(float(sys.argv[1]))" "$SAM3_CONFIDENCE")"

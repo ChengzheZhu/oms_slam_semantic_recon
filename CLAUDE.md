@@ -9,7 +9,7 @@ Sub-project 2 of 3 in the OMS stone-wall pipeline:
 RealSense D456 camera. ORB-SLAM3 tracks the camera; Open3D TSDF fuses depth into a dense
 mesh; SAM3 EDT alpha scoring separates stone interiors from seams.
 
-## Pipeline (6 numbered stages)
+## Pipeline (7 numbered stages)
 Each stage = a root wrapper `NN_*.sh` → `scripts/NN_*.py`. All settings in root `pipeline.yaml`
 (key `section.key` → shell var `SECTION_KEY`, loaded by `scripts/pipeline_env.sh`; vars already set
 in a wrapper's OVERRIDES block or the environment win). No hard-coded paths in wrappers.
@@ -23,6 +23,7 @@ in a wrapper's OVERRIDES block or the environment win). No hard-coded paths in w
 | 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + QR); QR-hole recovery |
 | 05 | `05_sam3_score.sh` → `05_sam3_score.py` | **L2**: per-frame EDT alpha maps → semantic TSDF → alpha_maps/*.npz + alpha_mesh.ply |
 | 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer alpha→raw mesh, cull seam triangles, segment into stone submeshes |
+| 07 | `07_export_rhino.sh` → `07_export_rhino.py` | Rhino export: cloud.ply (mesh vertices = TSDF surface points, face-less PLY → Rhino point cloud) + cameras.obj (OpenCV-convention cone per posed frame `cam_NNNNNN`, trajectory as degree-1 curve). Not glTF: Rhino's glTF importer keeps triangle primitives only. Optional; not in run_pipeline.sh |
 
 **Two tracks:**
 - **Non-batched** (`03 → 05 → 06`): single TSDF volume; orchestrated by `run_pipeline.sh`.
@@ -34,7 +35,7 @@ in a wrapper's OVERRIDES block or the environment win). No hard-coded paths in w
 ```
 oms_slam_semantic_recon/
   01_extract.sh 02_slam.sh 03_tsdf_rgb.sh 04_sam3_mask.sh
-  05_sam3_score.sh 06_cull_segment.sh     — stage wrappers
+  05_sam3_score.sh 06_cull_segment.sh 07_export_rhino.sh — stage wrappers
   03b_tsdf_rgb_batched.sh 05b_sam3_score_batched.sh 06b_cull_segment_batched.sh — batched variants
   run_pipeline.sh                                — orchestrator (non-batched)
   pipeline.yaml                                  — global settings: bag, output base, all stage params
@@ -171,6 +172,7 @@ Output written to `<paths.output_base>/<run_name>/` (default `output/`, gitignor
     alpha_batches/                — batched track (05b)
   batches/                        — batched track (03b)
   segments/                       — stage 06 culled mesh + per-stone submeshes
+  export/                         — stage 07 cloud.ply + cameras.obj for Rhino (SLAM world frame)
 ```
 
 ## Tunable parameters
