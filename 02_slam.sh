@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
 # 02_slam.sh — Run ORB-SLAM3 RGB-D tracking and convert the trajectory.
 # Saves the Atlas so other sensors can relocalize against this map.
-# Edit the variables below, then run:  bash 02_slam.sh
+# Settings: pipeline.yaml (paths.*, slam.*, orbslam.*). Run:  bash 02_slam.sh
+# Writes sparse/orbslam_settings.yaml next to the atlas for relocalisation.
 set -e
 
-source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
-    || source ~/miniconda3/etc/profile.d/conda.sh
-conda activate slam_recon
-
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# ── EDIT THESE ────────────────────────────────────────────────────────────────
-FRAMES_DIR=/home/chengzhe/Data/OMS_data3/rs_bags/base_20260127_015119
-OUTPUT_DIR=$PROJECT_DIR/output/base/sparse
-FPS=30            # effective FPS of the extracted frames
-
-# Atlas path (no .osa extension) — set to empty string "" to skip saving
-SAVE_ATLAS=$OUTPUT_DIR/atlas
-
-# Uncomment to load an existing atlas (localization mode):
-# LOAD_ATLAS=$OUTPUT_DIR/atlas
-# LOCALIZE=--localize
+# ── OVERRIDES — this run only; uncomment to replace pipeline.yaml values ──────
+# FRAMES_DIR=/abs/path/to/frames
+# SPARSE_DIR=/abs/path/to/sparse
+# SLAM_EQUALIZE=false
+# SLAM_LOAD_ATLAS=/abs/path/to/atlas      # no .osa
+# SLAM_LOCALIZE=true
+# ORBSLAM_N_FEATURES=6000
 # ──────────────────────────────────────────────────────────────────────────────
 
-ATLAS_ARG=""
-[ -n "${SAVE_ATLAS:-}" ] && ATLAS_ARG="--save_atlas $SAVE_ATLAS"
+source "$(dirname "$0")/scripts/pipeline_env.sh"
 
-# LOAD_ATLAS_ARG=""
-# [ -n "${LOAD_ATLAS:-}" ] && LOAD_ATLAS_ARG="--load_atlas $LOAD_ATLAS"
+ATLAS_ARGS=()
+[ "$SLAM_SAVE_ATLAS" = true ] && ATLAS_ARGS+=(--save_atlas "$SPARSE_DIR/atlas")
+[ -n "$SLAM_LOAD_ATLAS" ]     && ATLAS_ARGS+=(--load_atlas "$SLAM_LOAD_ATLAS")
 
 python "$PROJECT_DIR/scripts/02_slam.py" \
-    --frames_dir "$FRAMES_DIR" \
-    --output_dir "$OUTPUT_DIR" \
-    --fps        "$FPS"        \
-    --headless                 \
-    --equalize                 \
-    $ATLAS_ARG                 \
-    ${LOAD_ATLAS_ARG:-}        \
-    ${LOCALIZE:-}
+    --frames_dir "$FRAMES_DIR"         \
+    --output_dir "$SPARSE_DIR"         \
+    --vocab      "$SLAM_VOCAB"         \
+    --fps        "$SLAM_FPS"           \
+    --clahe_clip_limit "$SLAM_CLAHE_CLIP_LIMIT" \
+    --clahe_tile_grid  "$SLAM_CLAHE_TILE_GRID"  \
+    --orb_n_features   "$ORBSLAM_N_FEATURES"   \
+    --orb_scale_factor "$ORBSLAM_SCALE_FACTOR" \
+    --orb_n_levels     "$ORBSLAM_N_LEVELS"     \
+    --orb_ini_th_fast  "$ORBSLAM_INI_TH_FAST"  \
+    --orb_min_th_fast  "$ORBSLAM_MIN_TH_FAST"  \
+    --th_depth         "$ORBSLAM_TH_DEPTH"     \
+    --stereo_b         "$ORBSLAM_STEREO_B"     \
+    "${ATLAS_ARGS[@]}"                 \
+    $(flag "$SLAM_VIEWER"   --viewer)   \
+    $(flag "$SLAM_EQUALIZE" --equalize) \
+    $(flag "$SLAM_LOCALIZE" --localize)

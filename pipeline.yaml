@@ -1,0 +1,88 @@
+# pipeline.yaml — global settings for every step script (01_*.sh … 06_*.sh).
+#
+# Each key becomes a shell variable named SECTION_KEY (upper case), e.g.
+#   extract.stride  → EXTRACT_STRIDE      tsdf.voxel_size → TSDF_VOXEL_SIZE
+# To override for one step, set that variable in the step's OVERRIDES block
+# (or on the command line:  TSDF_VOXEL_SIZE=0.005 bash 03_tsdf_rgb.sh).
+# To use a different config file:  PIPELINE_CONFIG=my.yaml bash run_pipeline.sh
+#
+# Relative paths resolve against the project root.
+#
+# Run layout (derived in scripts/pipeline_env.sh):
+#   <output_base>/<run_name>/
+#     frames/              step 01  colour/depth/confidence + intrinsic.json
+#                                   (+ SAM3 mask caches from step 04)
+#     sparse/              step 02  trajectory_open3d.log, atlas.osa,
+#                                   orbslam_settings.yaml (read by registration 02a)
+#     raw_mesh_rgb.ply     step 03
+#     batches/             step 03b
+#     scoring/             step 05  alpha_maps/, alpha_mesh.ply  (05b: alpha_batches/)
+#     segments/            step 06 / 06b
+
+paths:
+  bag: /home/chengzhe/Data/OMS_data3/rs_bags/20260127_015119.bag
+  output_base: output
+  run_name: ""          # "" = bag file name without .bag
+  frames_dir: ""        # "" = <run dir>/frames; set to reuse frames elsewhere
+
+extract:                # step 01
+  stride: 1             # extract every Nth frame
+  max_frames: 0         # 0 = no limit
+  skip_confidence: false
+
+slam:                   # step 02
+  fps: 30               # frame rate after stride (30 / extract.stride). ORB-SLAM3 uses it as
+                        # the max frames between keyframes; it does NOT change playback
+                        # speed (rgbd_tum paces by the real timestamps in timestamps.txt)
+  equalize: true        # CLAHE before SLAM (originals kept for TSDF); registration 02a follows it
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: 8    # tiles per image side
+  viewer: false
+  save_atlas: true      # save <run dir>/sparse/atlas.osa
+  load_atlas: ""        # atlas path without .osa; "" = start fresh
+  localize: false       # localization-only (needs load_atlas)
+  vocab: external/orbslam3/Vocabulary/ORBvoc.txt
+
+orbslam:                # step 02 — ORB-SLAM3 settings; camera K comes from frames/intrinsic.json
+  n_features: 4000
+  scale_factor: 1.2     # pyramid scale step; registration 02a matches this pyramid
+  n_levels: 8
+  ini_th_fast: 20
+  min_th_fast: 7
+  th_depth: 40.0        # close/far split at th_depth * stereo_b metres
+  stereo_b: 0.095       # D456 stereo baseline (m)
+
+tsdf:                   # steps 03, 03b, 05, 05b — keep RGB and alpha meshes consistent
+  voxel_size: 0.002     # metres
+  depth_max: 3.0        # metres
+  depth_min: 0.15       # metres
+  confidence_threshold: 0   # 03/03b only: 0=off, 1=drop zero-confidence, 2=high only
+
+batch:                  # steps 03b, 05b — must match for 1-to-1 batch pairing
+  size: 100             # frames per batch
+  overlap: 15           # overlap frames between batches
+
+sam3:                   # step 04 (mask cache); confidence also names the cache dir used by 05
+  prompt: "individual stone"
+  confidence: 0.5
+  qr_prompt: "QR code marker"
+  qr_ring_px: 20        # dilation ring for enclosure check (pixels)
+  qr_min_coverage: 0.6  # fraction of QR ring that must be stone
+  skip_qr_recovery: false   # true = 05 reads the raw stone cache
+  n_workers: 4
+
+score:                  # steps 05, 05b
+  edt_gamma: 0.4        # <1 sharp seams, 1 linear, >1 conservative
+  sam_max_size_ratio: 0.15
+
+cull:                   # step 06
+  alpha_thresholds: [0.35]  # each value → thresh_<t>/ subdir
+  mesh_keep_components: 1   # keep N largest components (0 = off)
+  boundary_hops: 0          # BFS hops to fatten seam network (0 = off)
+  min_cluster_size: 1000    # min triangles per saved segment
+  skip_segments: true       # true = threshold tuning only, no per-stone PLYs
+
+cull_batched:           # step 06b
+  alpha_threshold: 0.5
+  chunk_size: 500000    # vertices per KD-tree query chunk; lower if OOM
+  save_score_maps: false

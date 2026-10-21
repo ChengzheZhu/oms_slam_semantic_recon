@@ -13,12 +13,12 @@ Input: a RealSense D456 `.bag`. Output: a segmented assembly mesh (per-stone sub
 
 ## Pipeline
 
-Six stages. Each stage is a root wrapper script `NN_*.sh` (edit its config block) over
+Six stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yaml`) over
 `scripts/NN_*.py`. `run_pipeline.sh` runs the non-batched track end to end.
 
 | # | Run | Does |
 |---|-----|------|
-| 01 | `01_extract.sh` | `.bag` → `color/`, `depth/`, `confidence/`, `intrinsic.json`, `timestamps.txt`, `streams.json` |
+| 01 | `01_extract.sh` | `.bag` → `color/`, `depth/` + `confidence/` (aligned to colour), `intrinsic.json`, `timestamps.txt`, `streams.json` |
 | 02 | `02_slam.sh` | ORB-SLAM3 RGB-D tracking + trajectory conversion → `trajectory_open3d.log` (+ pose-graph JSON) |
 | 03 | `03_tsdf_rgb.sh` | TSDF-fuse all frames → `raw_mesh_rgb.ply` (geometry) |
 | 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + QR prompts (one shared image encode); QR-hole recovery |
@@ -31,12 +31,28 @@ Six stages. Each stage is a root wrapper script `NN_*.sh` (edit its config block
   batches kept as separate meshes. `batch_size` / `batch_overlap` **must match** between `03b` and `05b`.
   Stages `01/02/04` are shared. See [`docs/drafts/0421_dev_notes.md`](docs/drafts/0421_dev_notes.md) for the rationale.
 
+## Configuration
+
+All settings live in **`pipeline.yaml`** at the repo root: input bag, output base dir,
+and every stage's tunable parameters. Each key maps to a shell variable `SECTION_KEY`
+(`tsdf.voxel_size` → `TSDF_VOXEL_SIZE`). Stage wrappers carry only a commented
+**OVERRIDES** block — uncomment a line there (or prefix the command) to change a value
+for that one run without touching the YAML:
+
+```bash
+TSDF_VOXEL_SIZE=0.005 bash 03_tsdf_rgb.sh        # one-off override
+PIPELINE_CONFIG=other.yaml bash run_pipeline.sh  # alternate config file
+```
+
+Paths per run are derived by `scripts/pipeline_env.sh`: `<paths.output_base>/<run_name>/`
+(`run_name` defaults to the bag name) holds `frames/`, `sparse/`, meshes, `scoring/`, `segments/`.
+
 ## Quick start
 
 ```bash
 conda activate slam_recon
 
-# Full non-batched pipeline (edit dataset paths at the top of each NN_*.sh first)
+# Full non-batched pipeline (set paths.bag / paths.output_base in pipeline.yaml first)
 bash run_pipeline.sh              # all stages 01–06
 bash run_pipeline.sh 3 6          # stages 03 through 06 only
 
@@ -68,25 +84,27 @@ bash install/setup_env.sh                   # create slam_recon env + install SA
 ```
 01_extract.sh … 06_cull_segment.sh   stage wrappers (+ 03b/05b/06b batched variants)
 run_pipeline.sh                       orchestrator (non-batched track)
+pipeline.yaml                         global settings: bag, output base, all stage params
+scripts/pipeline_env.sh               sourced by wrappers: loads pipeline.yaml, derives run paths
 scripts/NN_*.py                       stage implementations
-config/
-  camera/RealSense_D456.yaml          camera intrinsics for ORB-SLAM3
-  orbslam/                            ORB-SLAM3 configs
-  pipeline/default.yaml               pipeline defaults
 install/                              dependency / Pangolin / ORB-SLAM3 build + env setup
 external/  orbslam3, sam3             git submodules
 docs/                                 setup + feature guides
-output/<run>/                         gitignored results (meshes, scoring, segments)
+output/<run>/                         gitignored results (default paths.output_base)
 ```
 
 ## Output layout
 
 ```
-output/<run>/
+<output_base>/<run>/
+  frames/                       stage 01 frames + intrinsic.json (+ stage 04 SAM3 caches)
   sparse/
     CameraTrajectory.txt        ORB-SLAM3 TUM poses
     trajectory_open3d.log       Open3D camera log (used by 03 / 05)
+    atlas.osa                   ORB-SLAM3 map (relocalisation in oms_component_registration)
+    orbslam_settings.yaml       generated ORB-SLAM3 settings the atlas was built with
   raw_mesh_rgb.ply              stage 03 geometry mesh
+  batches/                      stage 03b batch meshes
   scoring/
     alpha_maps/alpha_*.npz      L2 EDT cache
     alpha_mesh.ply              stage 05 semantic mesh (grey = EDT score)

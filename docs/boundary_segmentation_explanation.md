@@ -208,8 +208,8 @@ segment). Run them via the orchestrator or per stage:
 # stages 04–06 (masks → scoring → cull/segment)
 bash run_pipeline.sh 4 6
 
-# or per stage — edit the config block at the top of each first
-bash 04_sam3_mask.sh          # sam_prompt, sam_confidence, QR recovery
-bash 05_sam3_score.sh         # edt_gamma, sam_max_size_ratio, voxel_size
-bash 06_cull_segment.sh       # alpha_thresholds, min_cluster_size
+# or per stage — settings in pipeline.yaml (sam3.*, score.*, cull.*)
+bash 04_sam3_mask.sh          # sam3.prompt, sam3.confidence, QR recovery
+bash 05_sam3_score.sh         # score.edt_gamma, score.sam_max_size_ratio, tsdf.voxel_size
+bash 06_cull_segment.sh       # cull.alpha_thresholds, cull.min_cluster_size
 ```

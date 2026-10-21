@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # run_pipeline.sh — Run the full pipeline steps 01–06 in sequence.
 #
-# This script is a thin orchestrator. All parameters live in the individual
-# step scripts (01_extract.sh … 06_cull_segment.sh). Edit those first.
+# This script is a thin orchestrator. All settings (input bag, output base,
+# every step's parameters) live in pipeline.yaml; step scripts only hold
+# optional per-run overrides.
 #
 # Usage:
 #   bash run_pipeline.sh              # run all steps
 #   bash run_pipeline.sh 3 6          # run steps 03 through 06 only
+#   PIPELINE_CONFIG=my.yaml bash run_pipeline.sh   # alternate config
 #
 # Steps:
 #   01  Extract frames from .bag

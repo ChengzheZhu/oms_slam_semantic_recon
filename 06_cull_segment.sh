@@ -1,39 +1,25 @@
 #!/usr/bin/env bash
 # 06_cull_segment.sh — Transfer scores, cull seam triangles, segment stones.
 # Sweep multiple alpha thresholds in one run; each produces a thresh_*/ subdir.
-# Use --skip_segments for quick threshold tuning (no per-stone PLY export).
-# Edit the variables below, then run:  bash 06_cull_segment.sh
+# Set cull.skip_segments: true for quick threshold tuning (no per-stone PLY export).
+# Settings: pipeline.yaml (paths.*, cull.*). Run:  bash 06_cull_segment.sh
 set -e
 
-source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
-    || source ~/miniconda3/etc/profile.d/conda.sh
-conda activate slam_recon
-
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATASET=base-highres
-
-# ── EDIT THESE ────────────────────────────────────────────────────────────────
-RAW_MESH=$PROJECT_DIR/output/$DATASET/raw_mesh_rgb.ply
-ALPHA_MESH=$PROJECT_DIR/output/$DATASET/scoring/alpha_mesh.ply
-OUTPUT_DIR=$PROJECT_DIR/output/$DATASET/segments
-
-# Space-separated list; each value → thresh_<t>/ subdir
-ALPHA_THRESHOLDS="0.35"
-
-MESH_KEEP_COMPONENTS=1   # keep N largest components (0 = disabled)
-BOUNDARY_HOPS=0          # BFS hops to fatten seam network (0 = disabled)
-MIN_CLUSTER_SIZE=1000    # minimum triangles per saved segment
-
-# Uncomment to skip per-stone PLY export (threshold tuning only):
-SKIP_SEGMENTS=--skip_segments
+# ── OVERRIDES — this run only; uncomment to replace pipeline.yaml values ──────
+# RAW_MESH=/abs/path/to/raw_mesh_rgb.ply
+# SEGMENTS_DIR=/abs/path/to/segments
+# CULL_ALPHA_THRESHOLDS="0.3 0.35 0.4"
+# CULL_SKIP_SEGMENTS=false
 # ──────────────────────────────────────────────────────────────────────────────
 
+source "$(dirname "$0")/scripts/pipeline_env.sh"
+
 python "$PROJECT_DIR/scripts/06_cull_segment.py" \
-    --raw_mesh                  "$RAW_MESH"                  \
-    --alpha_mesh                "$ALPHA_MESH"                \
-    --output_dir                "$OUTPUT_DIR"                \
-    --alpha_thresholds          $ALPHA_THRESHOLDS            \
-    --mesh_keep_components      "$MESH_KEEP_COMPONENTS"      \
-    --boundary_propagation_hops "$BOUNDARY_HOPS"             \
-    --min_cluster_size          "$MIN_CLUSTER_SIZE"          \
-    ${SKIP_SEGMENTS:-}
+    --raw_mesh                  "$RAW_MESH"                   \
+    --alpha_mesh                "$SCORING_DIR/alpha_mesh.ply" \
+    --output_dir                "$SEGMENTS_DIR"               \
+    --alpha_thresholds          $CULL_ALPHA_THRESHOLDS        \
+    --mesh_keep_components      "$CULL_MESH_KEEP_COMPONENTS"  \
+    --boundary_propagation_hops "$CULL_BOUNDARY_HOPS"         \
+    --min_cluster_size          "$CULL_MIN_CLUSTER_SIZE"      \
+    $(flag "$CULL_SKIP_SEGMENTS" --skip_segments)
