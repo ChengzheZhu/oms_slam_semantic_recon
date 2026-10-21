@@ -33,7 +33,7 @@ from pipeline_common import (
     apply_depth_filter,
     get_rgbd_file_lists,
     load_intrinsic,
-    load_trajectory_log,
+    load_frame_poses,
 )
 
 
@@ -53,6 +53,8 @@ def _integrate_range(volume, frame_range, color_files, depth_files, conf_files,
                      use_conf, intrinsic, poses, depth_scale, depth_max,
                      depth_min_m, confidence_threshold, desc):
     for i in tqdm(frame_range, desc=desc):
+        if poses[i] is None:   # not tracked by ORB-SLAM3
+            continue
         color_np = np.asarray(Image.open(color_files[i]).convert('RGB'))
         depth_np = np.asarray(o3d.io.read_image(depth_files[i]))
         conf_np  = (np.asarray(o3d.io.read_image(conf_files[i]))
@@ -190,8 +192,7 @@ def main():
     intrinsic, depth_scale = load_intrinsic(args.intrinsic)
     print(f"  Camera: {intrinsic.width}x{intrinsic.height}")
 
-    poses = load_trajectory_log(args.trajectory)
-    print(f"  Poses:  {len(poses)}")
+    poses = load_frame_poses(args.trajectory, args.frames_dir)
 
     batches_dir, index = integrate_tsdf_batched(
         args.frames_dir, intrinsic, poses,

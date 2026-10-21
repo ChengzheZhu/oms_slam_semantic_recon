@@ -100,7 +100,7 @@ output/<run>/                         gitignored results (default paths.output_b
   frames/                       stage 01 frames + intrinsic.json (+ stage 04 SAM3 caches)
   sparse/
     CameraTrajectory.txt        ORB-SLAM3 TUM poses
-    trajectory_open3d.log       Open3D camera log (used by 03 / 05)
+    trajectory_open3d.log       timestamp + 4×4 pose per tracked frame (03 / 05 match by timestamp)
     atlas.osa                   ORB-SLAM3 map (relocalisation in oms_component_registration)
     orbslam_settings.yaml       generated ORB-SLAM3 settings the atlas was built with
   raw_mesh_rgb.ply              stage 03 geometry mesh

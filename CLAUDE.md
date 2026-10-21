@@ -121,9 +121,13 @@ Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips E
 - **Fork branch `shutdown-wait`** (off `66911af`) also fixes `SaveTrajectoryTUM` segfaulting after
   tracking loss (null parent KF) and `LoadAtlas` failing on absolute paths. Fork `master` diverges:
   it lowers relocalisation thresholds for all modes (50→20 PnP inliers) — not merged here.
-- **Known issue — trajectory index**: `CameraTrajectory.txt` omits lost frames and
-  `trajectory_open3d.log` has no frame index, while 03/05 fuse frame `i` with pose `i`. Any lost
-  frame shifts every later pose onto the wrong frame. Check `Number of poses` == frame count.
+- **Poses matched to frames by timestamp**: `trajectory_open3d.log` is `timestamp + 4×4 c2w` per
+  tracked frame; `pipeline_common.load_frame_poses` pairs each frame's `timestamps.txt` entry with
+  the nearest pose (≤ 1 ms) and steps 03/03b/05/05b skip frames with none. ORB-SLAM3 omits lost
+  frames and, while tracking is recently lost, repeats the last pose under the last timestamp;
+  `02_slam.py` drops those repeats. Index pairing (pre-2026-10-21) shifted every pose after the
+  first lost frame. Old 16-column logs: used only if pose count == frame count, else regenerate
+  with `python scripts/02_slam.py --convert_only --frames_dir … --output_dir <sparse dir>`.
 - **Runtime viewer toggle**: `rgbd_tum.cc` accepts argv[5] (0=headless, 1=viewer)
 - **FRAME_STRIDE matters**: stride=1 (30 fps) is more reliable than stride=3 for tracking on fast motion
 - **EDT gamma**: `(dist/max_dist)**gamma`; gamma<1 sharpens seams, =1 linear, >1 conservative
@@ -159,7 +163,7 @@ Output written to `<paths.output_base>/<run_name>/` (default `output/`, gitignor
   frames/                         — stage 01 frames + intrinsic.json (+ stage 04 SAM3 caches)
   sparse/
     CameraTrajectory.txt          — ORB-SLAM3 TUM poses
-    trajectory_open3d.log         — Open3D camera log (used by 03 / 05)
+    trajectory_open3d.log         — timestamp + 4×4 c2w per tracked frame (03 / 05 match by timestamp)
   raw_mesh_rgb.ply                — stage 03 geometry mesh
   scoring/
     alpha_maps/alpha_*.npz        — L2 EDT cache

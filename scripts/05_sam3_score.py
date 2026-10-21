@@ -40,7 +40,7 @@ from pipeline_common import (
     apply_depth_filter,
     get_rgbd_file_lists,
     load_intrinsic,
-    load_trajectory_log,
+    load_frame_poses,
 )
 from alpha_common import precompute_alphas
 
@@ -67,6 +67,8 @@ def integrate_semantic_tsdf(frames_dir, intrinsic, poses, alpha_dir,
 
     volume = _create_tsdf_volume(voxel_size, depth_max)
     for idx in tqdm(range(n_frames), desc="Semantic TSDF"):
+        if poses[idx] is None:   # not tracked by ORB-SLAM3
+            continue
         alpha_path = os.path.join(alpha_dir, f"alpha_{idx:06d}.npz")
         alpha    = np.load(alpha_path)['alpha']
         a_uint8  = (np.clip(alpha, 0.0, 1.0) * 255).astype(np.uint8)
@@ -130,8 +132,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     intrinsic, depth_scale = load_intrinsic(args.intrinsic)
-    poses = load_trajectory_log(args.trajectory)
-    print(f"  Camera: {intrinsic.width}x{intrinsic.height}  Poses: {len(poses)}")
+    print(f"  Camera: {intrinsic.width}x{intrinsic.height}")
+    poses = load_frame_poses(args.trajectory, args.frames_dir)
 
     color_files, _ = get_rgbd_file_lists(args.frames_dir)
     n_frames  = min(len(color_files), len(poses))

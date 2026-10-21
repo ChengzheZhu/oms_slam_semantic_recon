@@ -15,11 +15,14 @@ Outputs in <output_dir>/:
                                  atlas (read by oms_component_registration 02a)
   CameraTrajectory.txt         — raw TUM format from ORB-SLAM3
   KeyFrameTrajectory.txt
-  trajectory_open3d.log        — flat 4×4 row-major, used by steps 03/05
+  trajectory_open3d.log        — `timestamp` + 4×4 camera-to-world (row-major) per
+                                 tracked frame; steps 03/05 match it to frames by
+                                 timestamp (untracked frames are absent)
   trajectory_pose_graph.json
 
 Usage:
   python scripts/02_slam.py --frames_dir /path/to/frames --output_dir output/sparse
+  python scripts/02_slam.py --convert_only --frames_dir … --output_dir …   # redo step 5 only
 """
 
 import argparse
@@ -154,11 +157,12 @@ def load_tum_trajectory(path):
 
 def save_open3d_log(poses, path):
     with open(path, 'w') as f:
-        f.write(f"# Open3D trajectory log\n")
+        f.write(f"# Camera trajectory (camera-to-world)\n")
         f.write(f"# Number of poses: {len(poses)}\n")
-        f.write(f"# Format: 4x4 transformation matrix (row-major)\n#\n")
-        for _, T in poses:
-            f.write(' '.join(f'{v:.12f}' for v in T.flatten()) + '\n')
+        f.write(f"# Format: timestamp(s) m00 m01 … m33 (4x4 row-major)\n")
+        f.write(f"# Untracked frames are absent; match frames by timestamp.\n#\n")
+        for ts, T in poses:
+            f.write(f'{ts:.6f} ' + ' '.join(f'{v:.12f}' for v in T.flatten()) + '\n')
 
 
 def save_pose_graph_json(poses, path):
@@ -269,6 +273,52 @@ def build_orbslam_settings(intrinsic_file, args):
     return text
 
 
+def convert_trajectory(output_dir, frames_dir):
+    """CameraTrajectory.txt (TUM) → trajectory_open3d.log + pose-graph JSON."""
+    print("\n[3/3] Converting trajectory to Open3D format…")
+    tum_file = os.path.join(output_dir, 'CameraTrajectory.txt')
+    poses    = load_tum_trajectory(tum_file)
+    print(f"  Loaded {len(poses)} poses")
+
+    # While tracking is recently lost ORB-SLAM3 writes the previous frame's pose
+    # again under the previous frame's timestamp (Tracking.cc "This can happen if
+    # tracking is lost"). Those frames have no pose of their own: keep the first.
+    seen, unique = set(), []
+    for t, T in poses:
+        if round(t, 6) not in seen:
+            seen.add(round(t, 6))
+            unique.append((t, T))
+    if len(unique) < len(poses):
+        print(f"  Dropped {len(poses) - len(unique)} repeated poses (frames while "
+              f"tracking was lost)")
+    poses = unique
+
+    if not poses:
+        print("ERROR: Trajectory is empty")
+        sys.exit(1)
+
+    ts      = [t for t, _ in poses]
+    dur     = ts[-1] - ts[0]
+    avg_fps = len(poses) / dur if dur > 0 else 0
+    print(f"  Duration: {dur:.1f}s  avg {avg_fps:.1f} fps")
+
+    ts_file = os.path.join(frames_dir, 'timestamps.txt')
+    if os.path.exists(ts_file):
+        with open(ts_file) as f:
+            n_frames = sum(1 for l in f if l.strip())
+        lost = n_frames - len(poses)
+        print(f"  Tracked {len(poses)}/{n_frames} frames"
+              + (f" — {lost} untracked, skipped by steps 03/05" if lost > 0 else ""))
+
+    log_path  = os.path.join(output_dir, 'trajectory_open3d.log')
+    json_path = os.path.join(output_dir, 'trajectory_pose_graph.json')
+    save_open3d_log(poses, log_path)
+    # Nodes are tracked poses in order (no frame index); not used by later steps.
+    save_pose_graph_json(poses, json_path)
+    print(f"  ✓ trajectory_open3d.log")
+    print(f"  ✓ trajectory_pose_graph.json")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -311,6 +361,9 @@ def main():
                         help='Force viewer off even with --viewer (viewer is off by default)')
     parser.add_argument('--viewer',      action='store_true',
                         help='Enable ORB-SLAM3 viewer window')
+    parser.add_argument('--convert_only', action='store_true',
+                        help='Skip SLAM; regenerate trajectory_open3d.log from the '
+                             'CameraTrajectory.txt already in --output_dir')
     parser.add_argument('--equalize',    action='store_true',
                         help='Apply CLAHE on luminance channel before SLAM '
                              '(normalises RealSense exposure; originals kept '
@@ -321,6 +374,11 @@ def main():
     args = parser.parse_args()
 
     use_viewer = args.viewer and not args.headless
+
+    if args.convert_only:
+        convert_trajectory(args.output_dir, args.frames_dir)
+        print(f"\nDone — outputs in {args.output_dir}")
+        return
 
     print("=" * 60)
     print("Step 02 — ORB-SLAM3 SLAM")
@@ -437,27 +495,7 @@ def main():
         print("ERROR: No trajectory files produced — SLAM failed")
         sys.exit(1)
 
-    # ── Step 3: convert trajectory ────────────────────────────────────────
-    print("\n[3/3] Converting trajectory to Open3D format…")
-    tum_file = os.path.join(args.output_dir, 'CameraTrajectory.txt')
-    poses    = load_tum_trajectory(tum_file)
-    print(f"  Loaded {len(poses)} poses")
-
-    if not poses:
-        print("ERROR: Trajectory is empty")
-        sys.exit(1)
-
-    ts      = [t for t, _ in poses]
-    dur     = ts[-1] - ts[0]
-    avg_fps = len(poses) / dur if dur > 0 else 0
-    print(f"  Duration: {dur:.1f}s  avg {avg_fps:.1f} fps")
-
-    log_path  = os.path.join(args.output_dir, 'trajectory_open3d.log')
-    json_path = os.path.join(args.output_dir, 'trajectory_pose_graph.json')
-    save_open3d_log(poses, log_path)
-    save_pose_graph_json(poses, json_path)
-    print(f"  ✓ trajectory_open3d.log")
-    print(f"  ✓ trajectory_pose_graph.json")
+    convert_trajectory(args.output_dir, args.frames_dir)
 
     print(f"\nDone — outputs in {args.output_dir}")
 
