@@ -2,7 +2,7 @@
 
 RGB-D SLAM + semantic segmentation of a dry-stacked stone **wall (the assembly)**.
 ORB-SLAM3 tracks the camera, Open3D fuses depth into a dense TSDF mesh, and SAM3
-EDT alpha-scoring separates individual stone interiors from the seams between them.
+masks vote per frame on stone vs seam, separating individual stones from the seams between them.
 
 Sub-project **2 of 3** in the OMS stone-wall pipeline:
 1. **Components** (`oms_monocular_semantic_recon`) — per-stone reconstruction (MASt3R/VGGT + SAM3)
@@ -21,9 +21,9 @@ Seven stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yam
 | 01 | `01_extract.sh` | `.bag` → `color/`, `depth/` + `confidence/` (aligned to colour), `intrinsic.json`, `timestamps.txt`, `streams.json` |
 | 02 | `02_slam.sh` | ORB-SLAM3 RGB-D tracking + trajectory conversion → `trajectory_open3d.log` (+ pose-graph JSON) |
 | 03 | `03_tsdf_rgb.sh` | TSDF-fuse all frames → `raw_mesh_rgb.ply` (geometry) |
-| 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + QR prompts (one shared image encode); QR-hole recovery |
-| 05 | `05_sam3_score.sh` | **L2**: per-frame EDT alpha maps → semantic TSDF → `alpha_mesh.ply` |
-| 06 | `06_cull_segment.sh` | transfer alpha scores to the RGB mesh, cull seam triangles, segment into stone submeshes |
+| 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + paper-label prompts (one shared image encode); border filter + label recovery |
+| 05 | `05_sam3_score.sh` | **L2**: per-frame seam votes (inside mask + distance to its edge in mm) → semantic TSDF → `vote_mesh.ply` |
+| 06 | `06_cull_segment.sh` | transfer vote + seam score to the RGB mesh, cull seam triangles, segment into stone submeshes |
 | 07 | `07_export_rhino.sh` | export for Rhino: `cloud.ply` (TSDF surface points) + `cameras.obj` (camera cones, trajectory polyline); optional, not in `run_pipeline.sh` |
 
 **Two tracks:**
@@ -107,8 +107,8 @@ output/<run>/                         gitignored results (default paths.output_b
   raw_mesh_rgb.ply              stage 03 geometry mesh
   batches/                      stage 03b batch meshes
   scoring/
-    alpha_maps/alpha_*.npz      L2 EDT cache
-    alpha_mesh.ply              stage 05 semantic mesh (grey = EDT score)
+    edt_maps/edt_*.npz          L2 EDT cache
+    vote_mesh.ply               stage 05 semantic mesh (colour R, G = seam score, vote)
   segments/                     stage 06 culled mesh + per-stone submeshes
   export/                       stage 07 cloud.ply + cameras.obj (SLAM world frame, export.units)
 ```

@@ -3,21 +3,25 @@
 04_sam3_mask.py — Pre-compute SAM3 raw mask cache for all extracted frames (L1 cache).
 
 Single-pass approach (image encoded once per frame, two prompts share the encoding):
-  Prompt 1: "individual stone" → stone masks
-  Prompt 2: "QR code"          → QR masks
+  Prompt 1: --sam_prompt   ("individual stone") → stone masks
+  Prompt 2: --label_prompt ("paper label")      → label masks
 
-QR hole recovery (CPU, post-process):
-  QR codes attached to stones appear as holes in the stone mask.
-  For each QR mask, the immediate ring (dilation - QR) is checked against all
-  stone masks.  If one stone mask covers > --qr_min_coverage of the ring, the
-  QR is enclosed by that stone and its pixels are OR-merged into the stone mask.
+Label recovery (CPU post-process) → merged cache read by step 05:
+  Paper labels on stones read as holes or notches in the stone mask. Each
+  label is grown by --label_ring_px; the outer edge of the grown mask is its
+  perimeter. The stone covering the largest share of that perimeter takes the
+  label if the share is >= --label_min_coverage. The merged area is the label
+  grown by --label_grow_px, minus pixels of other stones.
 
-Writes:
-  <frames_dir>/sam3_mask_cache_conf_<c>/          — raw stone masks (L1)
-  <frames_dir>/sam3_qr_cache_conf_<c>/            — raw QR masks
-  <frames_dir>/sam3_mask_cache_conf_<c>_qr_filled/ — merged masks (→ step 05)
+Writes (names from sam3_cache.py; raw caches are named by prompt):
+  <frames_dir>/sam3_<stone prompt>_conf_<c>/                — raw stone masks (L1)
+  <frames_dir>/sam3_<label prompt>_conf_<c>/                — raw label masks
+  <frames_dir>/sam3_merged_<stone>+<label>_conf_<c>/        — merged masks (→ step 05)
+      masks_NNNNNN.npz: masks, scores; params.json: label recovery settings
 
-Already-cached frames are skipped — safe to resume after interruption.
+Already-cached frames are skipped — safe to resume after interruption. The
+merged cache is rebuilt when its params.json no longer matches the settings.
+With --skip_label_recovery, step 05 reads the raw stone cache.
 
 Usage:
   python scripts/04_sam3_mask.py --frames_dir /path/to/frames
@@ -28,6 +32,8 @@ sys.path = [p for p in sys.path if not p.startswith('/usr/local/lib/python3.12')
 
 import os
 import argparse
+import glob
+import json
 import numpy as np
 from tqdm import tqdm
 from PIL import Image, ImageDraw
@@ -37,6 +43,8 @@ import torch
 
 from sam3 import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
+
+from sam3_cache import merged_dir, raw_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,96 +101,121 @@ def cache_masks_frame_multi(image_path, processor, prompts_and_paths):
         np.savez_compressed(cache_path, masks=masks_np, scores=scores_np)
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# QR hole recovery
+# Label recovery
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _disk(r):
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+
+
+def _perimeter(mask, ring_px):
+    """(ys, xs) of the outer edge of mask grown by ring_px, minus image-edge pixels."""
+    grown = cv2.dilate(mask.astype(np.uint8), _disk(ring_px))
+    contours, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return np.zeros(0, int), np.zeros(0, int)
+    pts = np.unique(np.vstack(contours)[:, 0], axis=0)      # (x, y)
+    h, w = mask.shape
+    # where the grown label is clipped by the frame the edge is not a real perimeter
+    inside = (pts[:, 0] > 0) & (pts[:, 0] < w - 1) & (pts[:, 1] > 0) & (pts[:, 1] < h - 1)
+    return pts[inside, 1], pts[inside, 0]
+
+
+def merge_labels_frame(stone_masks, stone_scores, label_masks,
+                       ring_px, min_coverage, grow_px):
+    """Label recovery for one frame (see module docstring). Returns (masks, stats)."""
+    merged = stone_masks.copy()
+    n_merged = 0
+    if len(stone_masks) and len(label_masks):
+        claims = stone_masks.sum(axis=0, dtype=np.int32)
+        grow_kernel = _disk(grow_px) if grow_px > 0 else None
+        for label in label_masks:
+            ys, xs = _perimeter(label, ring_px)
+            if not len(ys):
+                continue
+            coverage = stone_masks[:, ys, xs].mean(axis=1)    # perimeter share per stone
+            best = int(coverage.argmax())
+            if coverage[best] < min_coverage:
+                continue
+            grown = (cv2.dilate(label.astype(np.uint8), grow_kernel).astype(bool)
+                     if grow_kernel is not None else label)
+            other_stones = (claims - stone_masks[best]) > 0
+            merged[best] |= grown & ~other_stones
+            n_merged += 1
+    return merged, dict(labels=len(label_masks), merged=n_merged)
+
 
 def _recovery_worker(args):
-    """
-    Per-frame worker (module-level for multiprocessing pickling).
-    Returns number of QR masks merged in this frame.
-    """
-    i, stone_cache_dir, qr_cache_dir, combined_dir, ring_px, min_coverage = args
+    """Per-frame worker (module-level for multiprocessing pickling). Returns stats or None."""
+    (i, stone_cache_dir, label_cache_dir, merged_cache_dir,
+     ring_px, min_coverage, grow_px) = args
 
-    out_path = os.path.join(combined_dir, f"masks_{i:06d}.npz")
+    out_path = os.path.join(merged_cache_dir, f"masks_{i:06d}.npz")
     if os.path.exists(out_path):
-        return 0
+        return None
 
-    stone_path = os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")
-    qr_path    = os.path.join(qr_cache_dir,    f"masks_{i:06d}.npz")
-
-    stone_data   = np.load(stone_path)
-    stone_masks  = stone_data['masks'].astype(bool)    # (N, H, W)
+    stone_data   = np.load(os.path.join(stone_cache_dir, f"masks_{i:06d}.npz"))
+    stone_masks  = stone_data['masks'].astype(bool)          # (N, H, W)
     stone_scores = stone_data['scores'].astype(np.float32)
+    label_masks  = np.load(os.path.join(label_cache_dir, f"masks_{i:06d}.npz")
+                           )['masks'].astype(bool)           # (M, H, W)
 
-    if not os.path.exists(qr_path):
-        np.savez_compressed(out_path, masks=stone_masks.astype(np.uint8),
-                            scores=stone_scores)
-        return 0
-
-    qr_data  = np.load(qr_path)
-    qr_masks = qr_data['masks'].astype(bool)    # (M, H, W)
-
-    if qr_masks.shape[0] == 0 or stone_masks.shape[0] == 0:
-        np.savez_compressed(out_path, masks=stone_masks.astype(np.uint8),
-                            scores=stone_scores)
-        return 0
-
-    # cv2.dilate is ~10× faster than scipy binary_dilation on large kernels
-    kernel      = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=np.uint8)
-    merged_masks = stone_masks.copy()
-    # precompute float32 view for vectorised coverage sum
-    stone_f     = stone_masks.astype(np.float32)   # (N, H, W)
-    n_merged    = 0
-
-    for qr_mask in qr_masks:
-        expanded  = cv2.dilate(qr_mask.astype(np.uint8), kernel)
-        ring      = expanded.astype(bool) & ~qr_mask
-        ring_size = int(ring.sum())
-        if ring_size == 0:
-            continue
-
-        # vectorised: coverage of ring by every stone mask simultaneously
-        ring_f    = ring.astype(np.float32)
-        coverages = (stone_f * ring_f[np.newaxis]).sum(axis=(1, 2)) / ring_size
-        best_idx  = int(coverages.argmax())
-        if coverages[best_idx] >= min_coverage:
-            merged_masks[best_idx] |= qr_mask
-            n_merged += 1
-
-    np.savez_compressed(out_path, masks=merged_masks.astype(np.uint8),
-                        scores=stone_scores)
-    return n_merged
+    masks, stats = merge_labels_frame(stone_masks, stone_scores, label_masks,
+                                      ring_px, min_coverage, grow_px)
+    np.savez_compressed(out_path, masks=masks.astype(np.uint8), scores=stone_scores)
+    return stats
 
 
-def apply_qr_recovery(stone_cache_dir, qr_cache_dir, combined_dir, n_frames,
-                       ring_px=10, min_coverage=0.5, n_workers=4):
+def apply_label_recovery(stone_cache_dir, label_cache_dir, merged_cache_dir, n_frames,
+                         ring_px=3, min_coverage=0.6, grow_px=2, n_workers=4):
     """
-    Parallel QR hole recovery across frames.
-    Returns (combined_dir, total_merged_count).
+    Parallel label recovery across frames. Frames already in merged_cache_dir
+    are kept only if its params.json matches these settings.
     """
-    os.makedirs(combined_dir, exist_ok=True)
+    os.makedirs(merged_cache_dir, exist_ok=True)
+    params = dict(stone_cache=os.path.basename(stone_cache_dir),
+                  label_cache=os.path.basename(label_cache_dir),
+                  label_ring_px=ring_px,
+                  label_min_coverage=min_coverage, label_grow_px=grow_px)
+    params_path = os.path.join(merged_cache_dir, 'params.json')
+    old_params = None
+    if os.path.exists(params_path):
+        with open(params_path) as f:
+            old_params = json.load(f)
+    stale = sorted(glob.glob(os.path.join(merged_cache_dir, 'masks_*.npz')))
+    if stale and old_params != params:
+        print(f"  Merged cache settings changed ({old_params} → {params}); "
+              f"rebuilding {len(stale)} frames")
+        for path in stale:
+            os.remove(path)
+    with open(params_path, 'w') as f:
+        json.dump(params, f, indent=2)
 
     n_done = sum(1 for i in range(n_frames)
-                 if os.path.exists(os.path.join(combined_dir, f"masks_{i:06d}.npz")))
+                 if os.path.exists(os.path.join(merged_cache_dir, f"masks_{i:06d}.npz")))
     if n_done == n_frames:
-        print(f"  QR recovery already complete ({n_done}/{n_frames}) — skipping")
-        return combined_dir, 0
+        print(f"  Label recovery already complete ({n_done}/{n_frames}) — skipping")
+        return merged_cache_dir
 
     frame_args = [
-        (i, stone_cache_dir, qr_cache_dir, combined_dir, ring_px, min_coverage)
+        (i, stone_cache_dir, label_cache_dir, merged_cache_dir,
+         ring_px, min_coverage, grow_px)
         for i in range(n_frames)
     ]
-
     with Pool(processes=n_workers) as pool:
         results = list(tqdm(pool.imap(_recovery_worker, frame_args),
-                            total=n_frames, desc="QR hole recovery"))
+                            total=n_frames, desc="Label recovery"))
 
-    n_merged_total  = sum(results)
-    n_frames_merged = sum(1 for r in results if r > 0)
-    print(f"  ✓ QR recovery: {n_merged_total} QR regions merged "
-          f"across {n_frames_merged} frames → {combined_dir}")
-    return combined_dir, n_merged_total
+    total = {}
+    for stats in results:
+        for k, v in (stats or {}).items():
+            total[k] = total.get(k, 0) + v
+    if total:
+        print(f"  ✓ Labels merged: {total['merged']}/{total['labels']}")
+    print(f"  → {merged_cache_dir}")
+    return merged_cache_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,11 +299,12 @@ def save_debug_previews(color_files, cache_dir, debug_dir, sam_prompt,
     print(f"  ✓ {len(indices)} debug previews → {debug_dir}/")
 
 
-def save_qr_recovery_debug(color_files, stone_cache_dir, qr_cache_dir,
-                            combined_cache_dir, debug_dir, n_samples=15):
+
+def save_label_recovery_debug(color_files, stone_cache_dir, label_cache_dir,
+                              merged_cache_dir, debug_dir, n_samples=15):
     """
-    Three-column debug: original | stone masks | merged masks (QR holes filled).
-    Frames where a QR merge happened are highlighted with a red border.
+    Three-column debug: original | raw stone masks | merged masks
+    (label masks outlined red).
     """
     try:
         from PIL import ImageFont
@@ -283,74 +317,54 @@ def save_qr_recovery_debug(color_files, stone_cache_dir, qr_cache_dir,
     rng     = np.random.default_rng(7)
 
     for idx in indices:
-        stone_path    = os.path.join(stone_cache_dir,    f"masks_{idx:06d}.npz")
-        combined_path = os.path.join(combined_cache_dir, f"masks_{idx:06d}.npz")
-        qr_path       = os.path.join(qr_cache_dir,       f"masks_{idx:06d}.npz")
-        if not (os.path.exists(stone_path) and os.path.exists(combined_path)):
+        stone_path  = os.path.join(stone_cache_dir,  f"masks_{idx:06d}.npz")
+        merged_path = os.path.join(merged_cache_dir, f"masks_{idx:06d}.npz")
+        if not (os.path.exists(stone_path) and os.path.exists(merged_path)):
             continue
 
         orig = Image.open(color_files[idx]).convert('RGB')
         W, H = orig.size
 
-        def make_overlay(masks_np, tint_colour=None):
+        def make_overlay(masks_np):
             overlay = orig.copy().convert('RGBA')
-            colours = [tuple(rng.integers(60, 220, size=3).tolist())
-                       for _ in range(len(masks_np))]
-            if tint_colour is not None:
-                colours = [tint_colour] * len(masks_np)
-            for mask, colour in zip(masks_np, colours):
+            for mask in masks_np:
+                colour              = tuple(rng.integers(60, 220, size=3).tolist())
                 fill_arr            = np.zeros((*mask.shape, 4), dtype=np.uint8)
                 fill_arr[mask == 1] = (*colour, 110)
                 overlay = Image.alpha_composite(overlay, Image.fromarray(fill_arr, 'RGBA'))
-            return overlay.convert('RGB')
+            return np.asarray(overlay.convert('RGB')).copy()
 
-        stone_masks    = np.load(stone_path)['masks']
-        combined_masks = np.load(combined_path)['masks']
+        stone_masks = np.load(stone_path)['masks']
+        merged      = np.load(merged_path)
+        label_masks = np.zeros((0, H, W), dtype=np.uint8)
+        label_path  = os.path.join(label_cache_dir, f"masks_{idx:06d}.npz")
+        if os.path.exists(label_path):
+            label_masks = np.load(label_path)['masks']
 
-        qr_masks = np.zeros((0, H, W), dtype=np.uint8)
-        if os.path.exists(qr_path):
-            qr_masks = np.load(qr_path)['masks']
-
-        stone_ov    = make_overlay(stone_masks)
-        combined_ov = make_overlay(combined_masks)
-
-        # Highlight QR masks in red on the combined overlay
-        if qr_masks.shape[0] > 0:
-            qr_layer = combined_ov.copy().convert('RGBA')
-            for qr_mask in qr_masks:
-                fill_arr            = np.zeros((*qr_mask.shape, 4), dtype=np.uint8)
-                fill_arr[qr_mask == 1] = (220, 30, 30, 160)
-                qr_layer = Image.alpha_composite(qr_layer, Image.fromarray(fill_arr, 'RGBA'))
-            combined_ov = qr_layer.convert('RGB')
-
-        # Detect if any QR was merged in this frame
-        diff = combined_masks.astype(np.int32).sum() - stone_masks.astype(np.int32).sum()
-        qr_merged = diff > 0
+        merged_ov = make_overlay(merged['masks'])
+        for label in label_masks:
+            contours, _ = cv2.findContours(label.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_NONE)
+            cv2.drawContours(merged_ov, contours, -1, (230, 30, 30), 1)
 
         footer_h = 28
         total_w  = W * 3
-
         canvas = Image.new('RGB', (total_w, H + footer_h), (20, 20, 20))
-        canvas.paste(orig,        (0, 0))
-        canvas.paste(stone_ov,    (W, 0))
-        canvas.paste(combined_ov, (W * 2, 0))
-
-        if qr_merged:
-            draw = ImageDraw.Draw(canvas)
-            draw.rectangle([W * 2, 0, total_w - 1, H - 1], outline=(220, 50, 50), width=4)
+        canvas.paste(orig,                                       (0, 0))
+        canvas.paste(Image.fromarray(make_overlay(stone_masks)), (W, 0))
+        canvas.paste(Image.fromarray(merged_ov),                 (W * 2, 0))
 
         footer = Image.new('RGB', (total_w, footer_h), (30, 30, 30))
         fd     = ImageDraw.Draw(footer)
-        qr_txt = f"  QR merged: {qr_masks.shape[0]} detected" if qr_merged else ""
         fd.text((6, 6),
                 f"frame {idx}  |  stone masks: {stone_masks.shape[0]}  "
-                f"|  combined: {combined_masks.shape[0]}{qr_txt}",
+                f"|  labels: {label_masks.shape[0]} (red)",
                 fill=(220, 220, 220), font=font_sm)
         canvas.paste(footer, (0, H))
 
-        canvas.save(os.path.join(debug_dir, f"{idx:06d}_qr_recovery.jpg"), quality=88)
+        canvas.save(os.path.join(debug_dir, f"{idx:06d}_label_recovery.jpg"), quality=88)
 
-    print(f"  ✓ {len(indices)} QR recovery previews → {debug_dir}/")
+    print(f"  ✓ {len(indices)} label recovery previews → {debug_dir}/")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,23 +373,27 @@ def save_qr_recovery_debug(color_files, stone_cache_dir, qr_cache_dir,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 04 — SAM3 mask cache (L1) with QR hole recovery")
+        description="Step 04 — SAM3 mask cache (L1) with label recovery")
     parser.add_argument('--frames_dir',       required=True,
                         help='Frames directory (from step 01)')
     parser.add_argument('--sam_prompt',       default="individual stone")
     parser.add_argument('--sam_confidence',   type=float, default=0.1)
-    # QR recovery args
-    parser.add_argument('--qr_prompt',        default="QR code",
-                        help='SAM3 text prompt for QR code detection (default: "QR code")')
-    parser.add_argument('--qr_ring_px',       type=int,   default=10,
-                        help='Dilation ring size in pixels for enclosure check (default 10)')
-    parser.add_argument('--qr_min_coverage',  type=float, default=0.5,
-                        help='Minimum fraction of QR ring covered by a stone mask '
-                             'to count as enclosed (default 0.5)')
-    parser.add_argument('--skip_qr_recovery', action='store_true',
-                        help='Skip QR hole recovery; output cache = raw stone cache')
+    # Label recovery args
+    parser.add_argument('--label_prompt',     default="paper label",
+                        help='SAM3 text prompt for the labels on stones (default: "paper label")')
+    parser.add_argument('--label_ring_px',    type=int,   default=3,
+                        help='Label grown by this many px; the grown outer edge is the '
+                             'perimeter checked against stone masks (default 3)')
+    parser.add_argument('--label_min_coverage', type=float, default=0.6,
+                        help='Share of that perimeter a stone mask must cover to take '
+                             'the label (default 0.6)')
+    parser.add_argument('--label_grow_px',    type=int,   default=2,
+                        help='Merged area = label grown by this many px, never into '
+                             'another stone (default 2)')
+    parser.add_argument('--skip_label_recovery', action='store_true',
+                        help='No label prompt or merge; step 05 reads the raw stone cache')
     parser.add_argument('--n_workers',        type=int,   default=4,
-                        help='Parallel workers for QR hole recovery (default 4)')
+                        help='Parallel workers for label recovery (default 4)')
     args = parser.parse_args()
 
     color_dir = os.path.join(args.frames_dir, 'color')
@@ -384,78 +402,85 @@ def main():
                          if f.endswith(('.jpg', '.png')))
     n_total = len(color_files)
 
-    stone_cache_dir = os.path.join(
-        args.frames_dir, f'sam3_mask_cache_conf_{args.sam_confidence}')
-    qr_cache_dir = os.path.join(
-        args.frames_dir, f'sam3_qr_cache_conf_{args.sam_confidence}')
-    combined_cache_dir = stone_cache_dir + '_qr_filled'
+    stone_cache_dir = raw_dir(args.frames_dir, args.sam_prompt, args.sam_confidence)
+    label_cache_dir = (None if args.skip_label_recovery else
+                       raw_dir(args.frames_dir, args.label_prompt, args.sam_confidence))
+    merged_cache_dir = (None if args.skip_label_recovery else
+                        merged_dir(args.frames_dir, args.sam_confidence,
+                                   args.sam_prompt, args.label_prompt))
 
-    n_stone_cached = sum(1 for i in range(n_total)
-                         if os.path.exists(
-                             os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")))
-    n_qr_cached = sum(1 for i in range(n_total)
-                      if os.path.exists(
-                          os.path.join(qr_cache_dir, f"masks_{i:06d}.npz")))
+    def n_cached(cache_dir):
+        return sum(1 for i in range(n_total)
+                   if os.path.exists(os.path.join(cache_dir, f"masks_{i:06d}.npz")))
+    n_stone_cached = n_cached(stone_cache_dir)
+    n_label_cached = n_cached(label_cache_dir) if label_cache_dir else 0
 
     print("=" * 60)
-    print("Step 04 — SAM3 Mask Cache + QR Hole Recovery")
+    print("Step 04 — SAM3 Mask Cache + Label Recovery")
     print("=" * 60)
     print(f"  frames_dir      : {args.frames_dir}")
     print(f"  stone cache     : {stone_cache_dir}")
-    print(f"  qr cache        : {qr_cache_dir}")
-    print(f"  combined cache  : {combined_cache_dir}")
+    print(f"  label cache     : {label_cache_dir or '(label recovery skipped)'}")
+    print(f"  merged cache    : {merged_cache_dir or '(label recovery skipped)'}")
     print(f"  frames          : {n_total}  "
-          f"(stone cached: {n_stone_cached}, qr cached: {n_qr_cached})")
+          f"(stone cached: {n_stone_cached}, label cached: {n_label_cached})")
     print(f"  stone prompt    : {args.sam_prompt!r}")
-    print(f"  qr prompt       : {args.qr_prompt!r}")
+    print(f"  label prompt    : {args.label_prompt!r}")
     print(f"  confidence      : {args.sam_confidence}")
-    print(f"  qr_ring_px      : {args.qr_ring_px}")
-    print(f"  qr_min_coverage : {args.qr_min_coverage}")
+    print(f"  label ring/cov/grow : {args.label_ring_px} px / "
+          f"{args.label_min_coverage} / {args.label_grow_px} px")
+
+    # Caches from before prompt-named dirs: the prompt was not recorded.
+    legacy = os.path.join(args.frames_dir,
+                          f'sam3_mask_cache_conf_{float(args.sam_confidence)}')
+    if n_stone_cached == 0 and os.path.isdir(legacy):
+        print(f"\n  NOTE: found {legacy} (older naming, prompt not recorded).\n"
+              f"  If it was made with {args.sam_prompt!r}, rename it to reuse it:\n"
+              f"    mv {legacy} {stone_cache_dir}")
 
     need_stone = n_stone_cached < n_total
-    need_qr    = (not args.skip_qr_recovery) and (n_qr_cached < n_total)
+    need_label = label_cache_dir is not None and n_label_cached < n_total
 
-    if need_stone or need_qr:
+    if need_stone or need_label:
         print("\nInitializing SAM3…")
         processor = initialize_sam3(args.sam_confidence)
-        os.makedirs(stone_cache_dir, exist_ok=True)
-        os.makedirs(qr_cache_dir,    exist_ok=True)
 
         print(f"\nCaching masks (image encoded once per frame; "
-              f"stone={need_stone}, qr={need_qr})")
+              f"stone={need_stone}, label={need_label})")
         for i, img_path in enumerate(tqdm(color_files, desc="SAM3 masks")):
             prompts_and_paths = []
             if need_stone:
                 prompts_and_paths.append(
                     (args.sam_prompt,
                      os.path.join(stone_cache_dir, f"masks_{i:06d}.npz")))
-            if need_qr:
+            if need_label:
                 prompts_and_paths.append(
-                    (args.qr_prompt,
-                     os.path.join(qr_cache_dir,    f"masks_{i:06d}.npz")))
+                    (args.label_prompt,
+                     os.path.join(label_cache_dir, f"masks_{i:06d}.npz")))
             cache_masks_frame_multi(img_path, processor, prompts_and_paths)
 
         if need_stone:
             print(f"  ✓ Stone mask cache → {stone_cache_dir}")
-        if need_qr:
-            print(f"  ✓ QR mask cache    → {qr_cache_dir}")
+        if need_label:
+            print(f"  ✓ Label mask cache → {label_cache_dir}")
     else:
-        print("\n  Both mask caches complete — skipping SAM3 inference.")
+        print("\n  Mask caches complete — skipping SAM3 inference.")
 
-    # ── QR hole recovery ──────────────────────────────────────────────────────
-    if args.skip_qr_recovery:
+    # ── Label recovery ────────────────────────────────────────────────────────
+    if args.skip_label_recovery:
         output_cache_dir = stone_cache_dir
-        print(f"\n  QR recovery skipped — downstream uses: {stone_cache_dir}")
+        print(f"\n  Label recovery skipped — downstream uses: {stone_cache_dir}")
     else:
-        print("\nApplying QR hole recovery…")
-        output_cache_dir, _ = apply_qr_recovery(
-            stone_cache_dir    = stone_cache_dir,
-            qr_cache_dir       = qr_cache_dir,
-            combined_dir       = combined_cache_dir,
-            n_frames           = n_total,
-            ring_px            = args.qr_ring_px,
-            min_coverage       = args.qr_min_coverage,
-            n_workers          = args.n_workers,
+        print("\nApplying label recovery…")
+        output_cache_dir = apply_label_recovery(
+            stone_cache_dir  = stone_cache_dir,
+            label_cache_dir  = label_cache_dir,
+            merged_cache_dir = merged_cache_dir,
+            n_frames         = n_total,
+            ring_px          = args.label_ring_px,
+            min_coverage     = args.label_min_coverage,
+            grow_px          = args.label_grow_px,
+            n_workers        = args.n_workers,
         )
 
     # ── Debug previews ────────────────────────────────────────────────────────
@@ -464,24 +489,20 @@ def main():
                         debug_dir=output_cache_dir + "_debug",
                         sam_prompt=args.sam_prompt,
                         sam_confidence=args.sam_confidence)
-
-    if not args.skip_qr_recovery:
-        save_qr_recovery_debug(
+    if not args.skip_label_recovery:
+        save_label_recovery_debug(
             color_files,
-            stone_cache_dir    = stone_cache_dir,
-            qr_cache_dir       = qr_cache_dir,
-            combined_cache_dir = combined_cache_dir,
-            debug_dir          = combined_cache_dir + "_debug",
+            stone_cache_dir  = stone_cache_dir,
+            label_cache_dir  = label_cache_dir,
+            merged_cache_dir = merged_cache_dir,
+            debug_dir        = merged_cache_dir + "_debug",
         )
 
     print(f"\n✓ Step 04 complete")
     print(f"  Pass 1 (stone) : {stone_cache_dir}/")
-    print(f"  Pass 2 (QR)    : {qr_cache_dir}/")
-    if not args.skip_qr_recovery:
-        print(f"  Combined (→ 05): {combined_cache_dir}/")
-        print(f"\n  Set MASK_CACHE_DIR={combined_cache_dir} in 05_sam3_score.sh")
-    else:
-        print(f"\n  Set MASK_CACHE_DIR={stone_cache_dir} in 05_sam3_score.sh")
+    if label_cache_dir:
+        print(f"  Pass 2 (label) : {label_cache_dir}/")
+    print(f"  → step 05      : {output_cache_dir}/")
 
 
 if __name__ == "__main__":

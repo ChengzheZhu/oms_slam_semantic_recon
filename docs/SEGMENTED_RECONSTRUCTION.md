@@ -23,12 +23,12 @@ variants. Edit the config block at the top of each wrapper, then:
 
 ```bash
 bash 03b_tsdf_rgb_batched.sh      # RGB TSDF → output/<run>/batches/
-bash 05b_sam3_score_batched.sh    # per-batch EDT alpha → scoring/alpha_batches/
+bash 05b_sam3_score_batched.sh    # per-batch seam votes → scoring/vote_batches/
 bash 06b_cull_segment_batched.sh  # cull + segment per batch → segments/
 ```
 
 **Critical:** `BATCH_SIZE` and `BATCH_OVERLAP` **must match** between
-`03b_tsdf_rgb_batched.sh` and `05b_sam3_score_batched.sh`, so each alpha batch has a
+`03b_tsdf_rgb_batched.sh` and `05b_sam3_score_batched.sh`, so each vote batch has a
 1-to-1 correspondence with its RGB batch. `06b` then queries batch-by-batch.
 
 ## Tuning
@@ -56,6 +56,6 @@ e.g. ~30 GB machine handles 2 mm voxels at ~100-frame batches (the current defau
 ```
 output/<run>/
   batches/                       03b — per-batch RGB meshes
-  scoring/alpha_batches/         05b — per-batch alpha meshes + index.json
+  scoring/vote_batches/          05b — per-batch vote meshes + index.json
   segments/                      06b — culled + segmented per batch
 ```

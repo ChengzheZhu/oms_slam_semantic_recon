@@ -3,11 +3,11 @@
 ## Project overview
 Sub-project 2 of 3 in the OMS stone-wall pipeline:
 1. **Components** (`oms_monocular_semantic_recon`) — MASt3R/VGGT + SAM3 → per-stone point clouds
-2. **This repo** — ORB-SLAM3 RGB-D SLAM + SAM3 EDT alpha scoring → segmented assembly mesh
+2. **This repo** — ORB-SLAM3 RGB-D SLAM + SAM3 seam voting → segmented assembly mesh
 3. **Registration** (future) — geometry-based matching of stones into the assembly
 
 RealSense D456 camera. ORB-SLAM3 tracks the camera; Open3D TSDF fuses depth into a dense
-mesh; SAM3 EDT alpha scoring separates stone interiors from seams.
+mesh; SAM3 masks vote per frame on stone vs seam, fused in a second TSDF.
 
 ## Pipeline (7 numbered stages)
 Each stage = a root wrapper `NN_*.sh` → `scripts/NN_*.py`. All settings in root `pipeline.yaml`
@@ -20,9 +20,9 @@ in a wrapper's OVERRIDES block or the environment win). No hard-coded paths in w
 | 01 | `01_extract.sh` → `01_extract_frames.py` | .bag → color/ depth/ confidence/ (depth+conf aligned to colour) intrinsic.json timestamps.txt streams.json |
 | 02 | `02_slam.sh` → `02_slam.py` | ORB-SLAM3 RGB-D tracking **and** TUM→Open3D trajectory conversion → trajectory_open3d.log (+ pose-graph JSON) |
 | 03 | `03_tsdf_rgb.sh` → `03_tsdf_rgb.py` | TSDF-fuse all frames → raw_mesh_rgb.ply (geometry only) |
-| 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + QR); QR-hole recovery |
-| 05 | `05_sam3_score.sh` → `05_sam3_score.py` | **L2**: per-frame EDT alpha maps → semantic TSDF → alpha_maps/*.npz + alpha_mesh.ply |
-| 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer alpha→raw mesh, cull seam triangles, segment into stone submeshes |
+| 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + paper label); label recovery |
+| 05 | `05_sam3_score.sh` → `05_sam3_score.py` | **L2**: per-frame inside mask + EDT → seam votes fused in a semantic TSDF → edt_maps/*.npz + vote_mesh.ply |
+| 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer vote/score→raw mesh, cull seam triangles, segment into stone submeshes |
 | 07 | `07_export_rhino.sh` → `07_export_rhino.py` | Rhino export: cloud.ply (mesh vertices = TSDF surface points, face-less PLY → Rhino point cloud) + cameras.obj (OpenCV-convention cone per posed frame `cam_NNNNNN`, trajectory as degree-1 curve). Not glTF: Rhino's glTF importer keeps triangle primitives only. Optional; not in run_pipeline.sh |
 
 **Two tracks:**
@@ -83,27 +83,38 @@ bash 03b_tsdf_rgb_batched.sh && bash 05b_sam3_score_batched.sh && bash 06b_cull_
 ## Scoring model (stages 04–06)
 ```
 04  SAM3 L1 mask cache
-    per frame → stone mask + QR mask (shared image encoding)
-    QR-hole recovery: QR-on-stone holes OR-merged back into the stone mask
-    → <frames_dir>/sam3_mask_cache_conf_<c>[_qr_filled]/masks_NNNNNN.npz
+    per frame → stone masks + label masks (shared image encoding)
+    → <frames_dir>/sam3_<prompt>_conf_<c>/masks_NNNNNN.npz   (one dir per prompt)
+    label recovery: label grown label_ring_px; stone covering >= label_min_coverage of
+      that perimeter takes the label grown label_grow_px (never into another stone)
+    → <frames_dir>/sam3_merged_<stone>+<label>_conf_<c>/masks_NNNNNN.npz (+ params.json)
 
-05  L2 EDT alpha + semantic TSDF
-    L1 mask → EDT → gamma → alpha score  =  (dist / max_dist) ** edt_gamma
-      0 = seam/background, 1 = stone interior
-    → alpha_maps/alpha_NNNNNN.npz (L2 cache) + alpha_mesh.ply (grey = score)
+05  L2 seam votes + semantic TSDF (scripts/vote_common.py)
+    per frame: inside = pixel in a stone mask; edt = pixel distance to the mask edge
+    seam score s = 2 * clip(d_mm / seam_width_mm, 0, 1) ** seam_gamma - 1   (-1 edge … +1)
+      d_mm = (edt - 1) * Z / fx with the pixel's own depth (aligned to colour in step 01)
+    TSDF colour R = inside * (s + 1) / 2, G = inside → per voxel after fusion:
+      vote  V = avg G             share of the views that put it inside a stone mask
+      score S = 2 * R / G - 1     mean s over just those views (shared weights cancel)
+    → edt_maps/edt_NNNNNN.npz (L2 cache) + vote_mesh.ply
 
 06  transfer + cull + segment
-    cKDTree: alpha_mesh vertices → raw_mesh vertices → per-vertex alpha
-    cull triangles below --alpha_threshold; segment remainder into stone patches
+    cKDTree: vote_mesh vertices → raw_mesh vertices → per-vertex V, S
+    seam vertex = V < vote_min (not stone) or S < score threshold (near an edge)
+    cull triangles with a seam vertex; segment remainder into stone patches
 ```
 
 ## Cache layers
 | Layer | Location | Content | Keyed on |
 |-------|----------|---------|----------|
-| L1 | `frames_dir/sam3_mask_cache_conf_<c>[_qr_filled]/masks_NNNNNN.npz` | raw SAM3 masks + scores | sam_prompt, sam_confidence, QR filling |
-| L2 | `output_dir/scoring/alpha_maps/alpha_NNNNNN.npz` | EDT alpha float32 | edt_gamma, sam_max_size_ratio |
+| L1 | `frames_dir/sam3_<prompt>_conf_<c>/masks_NNNNNN.npz` | raw SAM3 masks + scores | prompt (dir name), confidence |
+| L1 | `frames_dir/sam3_merged_<stone>+<label>_conf_<c>/masks_NNNNNN.npz` | stone masks with labels merged + scores | prompts (dir name); label settings (`params.json`, rebuilt on change) |
+| L2 | `output_dir/scoring/edt_maps/edt_NNNNNN.npz` | inside mask (bool) + pixel EDT (float16) | mask cache + sam_max_size_ratio (`params.json`, rebuilt on change) |
 
-Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips EDT).
+Re-running step 05 with the same masks reuses the L2 cache; seam_width_mm / seam_gamma only
+re-run the TSDF. Caches from
+before prompt-named dirs (`sam3_mask_cache_conf_<c>`) are not picked up; step 04 prints the
+`mv` that reuses one if it was made with the current stone prompt.
 
 ## Key design decisions
 - **ORB-SLAM3 submodule**: built in-place; vocabulary not in git
@@ -131,12 +142,22 @@ Re-running step 05 with the same output dir + gamma reuses the L2 cache (skips E
   with `python scripts/02_slam.py --convert_only --frames_dir … --output_dir <sparse dir>`.
 - **Runtime viewer toggle**: `rgbd_tum.cc` accepts argv[5] (0=headless, 1=viewer)
 - **FRAME_STRIDE matters**: stride=1 (30 fps) is more reliable than stride=3 for tracking on fast motion
-- **EDT gamma**: `(dist/max_dist)**gamma`; gamma<1 sharpens seams, =1 linear, >1 conservative
+- **Seam voting** (2026-10-21; replaced the EDT alpha `(dist/max_dist)**edt_gamma`, culled at
+  0.35): the old alpha averaged "outside every mask" as 0, so a stone SAM3 missed in some views,
+  or a label merged in only some views, was pulled toward the cut the same way a seam is. The vote
+  V (is it stone) and score S (how far from an edge, over just the views that say stone) separate
+  the two. Seam width is in mm, not a share of each mask's largest distance, so it no longer
+  scales with how large or how cut-off a stone looks in a frame
 - **CPU TSDF**: `ScalableTSDFVolume` (Open3D legacy API); GPU `VoxelBlockGrid` disabled (v0.19 device issues)
 - **Batched track**: keeps TSDF batches as separate PLYs to hit 2 mm voxel within ~30 GB RAM;
   scoring + culling operate on one batch mesh at a time (see `docs/drafts/0421_dev_notes.md`)
-- **QR-hole recovery** (step 04): QR markers on stones read as holes in the stone mask; a ring
-  dilation check merges an enclosed QR's pixels back into the covering stone mask
+- **Label recovery** (step 04): paper labels on stones read as holes or notches in the stone
+  mask; SAM3 `sam3.label_prompt` finds them and the stone covering most of the label's grown
+  perimeter takes it. Replaced the "QR code marker" prompt + 20 px ring (2026-10-21): QR masks
+  missed the paper around the code, and the wide ring reached past small stones
+- **Masks cut by the frame edge are kept**: the EDT does not treat the image edge as background,
+  so they add no seam there, and the sweep fuses each region from many views. Dropping them
+  (tested 2026-10-21, 300-frame sweep) lost 3.9% of the surface and culled 2.1% more along seams
 - **Run layout**: everything for one bag under `<paths.output_base>/<run_name>/` (frames/ included);
   set `paths.frames_dir` to reuse frames stored elsewhere
 
@@ -167,9 +188,9 @@ Output written to `<paths.output_base>/<run_name>/` (default `output/`, gitignor
     trajectory_open3d.log         — timestamp + 4×4 c2w per tracked frame (03 / 05 match by timestamp)
   raw_mesh_rgb.ply                — stage 03 geometry mesh
   scoring/
-    alpha_maps/alpha_*.npz        — L2 EDT cache
-    alpha_mesh.ply                — stage 05 semantic mesh
-    alpha_batches/                — batched track (05b)
+    edt_maps/edt_*.npz            — L2 EDT cache
+    vote_mesh.ply                 — stage 05 semantic mesh (colour R, G = score, vote)
+    vote_batches/                 — batched track (05b)
   batches/                        — batched track (03b)
   segments/                       — stage 06 culled mesh + per-stone submeshes
   export/                         — stage 07 cloud.ply + cameras.obj for Rhino (SLAM world frame)
@@ -179,10 +200,13 @@ Output written to `<paths.output_base>/<run_name>/` (default `output/`, gitignor
 All live in `pipeline.yaml` (full list + comments there). Key ones:
 | Where | YAML key (shell var) | Effect |
 |-------|----------------------|--------|
-| 05 | `score.edt_gamma` (`SCORE_EDT_GAMMA`) | Score falloff; lower = sharper seams |
+| 04 | `sam3.label_ring_px`, `sam3.label_min_coverage`, `sam3.label_grow_px` | Label → stone assignment + merged area |
+| 05 | `score.seam_width_mm` (`SCORE_SEAM_WIDTH_MM`) | Seam score reaches +1 this far inside a mask (mm) |
+| 05 | `score.seam_gamma` | Score falloff shape; <1 narrower seam |
 | 05 | `score.sam_max_size_ratio` | Max mask size fraction kept |
 | 03/05 | `tsdf.voxel_size` (`TSDF_VOXEL_SIZE`) | TSDF resolution (m); smaller = finer/slower |
-| 06 | `cull.alpha_thresholds` | Seam cutoff sweep |
+| 06 | `cull.score_thresholds` | Seam score cutoff sweep (S in [-1, 1]) |
+| 06 | `cull.vote_min` | Min share of views calling a vertex stone |
 | 06 | `cull.mesh_keep_components` | Keep N largest components |
 | 06 | `cull.min_cluster_size` | Min triangles per saved segment |
 | 03b/05b | `batch.size`, `batch.overlap` | Batched-track chunking (one setting, shared by 03b & 05b) |

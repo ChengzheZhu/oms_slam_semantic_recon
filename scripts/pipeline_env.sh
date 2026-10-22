@@ -31,14 +31,11 @@ SLAM_VOCAB="$(abspath "$SLAM_VOCAB")"
 : "${SEGMENTS_DIR:=$RUN_DIR/segments}"
 : "${EXPORT_DIR:=$RUN_DIR/export}"
 
-# Step 04 names its cache with Python's str(float), so normalise the same way.
-_conf="$(python -c "import sys; print(float(sys.argv[1]))" "$SAM3_CONFIDENCE")"
-if [ "$SAM3_SKIP_QR_RECOVERY" = true ]; then
-    : "${MASK_CACHE_DIR:=$FRAMES_DIR/sam3_mask_cache_conf_${_conf}}"
-else
-    : "${MASK_CACHE_DIR:=$FRAMES_DIR/sam3_mask_cache_conf_${_conf}_qr_filled}"
-fi
-unset _conf
+# Step 04's merged mask cache (step 05 input); named by scripts/sam3_cache.py.
+if [ "$SAM3_SKIP_LABEL_RECOVERY" = true ]; then _label=""; else _label="$SAM3_LABEL_PROMPT"; fi
+: "${MASK_CACHE_DIR:=$(python "$PROJECT_DIR/scripts/sam3_cache.py" \
+    "$FRAMES_DIR" "$SAM3_CONFIDENCE" "$SAM3_PROMPT" "$_label")}"
+unset _label
 
 echo "config : $PIPELINE_CONFIG"
 echo "run    : $RUN_DIR"

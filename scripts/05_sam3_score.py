@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-05_sam3_score.py — Compute per-frame EDT alpha maps and fuse them into a
-semantic TSDF mesh (L2 scoring pass).
+05_sam3_score.py — Per-frame seam votes from the SAM3 masks, fused into a
+semantic TSDF mesh (L2 scoring pass). Encoding: see vote_common.py.
 
 Reads:
   L1 mask cache : <mask_cache_dir>/masks_NNNNNN.npz  (step 04 output)
   trajectory    : trajectory_open3d.log  (step 02)
+  depth         : <frames_dir>/depth/ (aligned to colour in step 01)
 
 Writes:
-  <output_dir>/alpha_maps/alpha_NNNNNN.npz  — per-frame EDT alpha maps (L2 cache)
-  <output_dir>/alpha_mesh.ply               — semantic TSDF mesh encoding alpha scores
+  <output_dir>/edt_maps/edt_NNNNNN.npz  — per-frame inside mask + pixel EDT (L2 cache)
+  <output_dir>/vote_mesh.ply            — semantic TSDF mesh; vertex colour R, G
+                                          encode seam score S and vote V
 
-The alpha_mesh.ply is consumed by step 06 (cull_segment.py) which transfers
-scores to the raw RGB mesh and performs culling + segmentation.
-
-EDT alpha score per pixel:
-  0  = seam / background (on mask border or outside all masks)
-  1  = stone interior (maximum EDT distance)
-  score = (dist / max_dist) ** edt_gamma  (adjustable without re-running step 04)
+Per pixel inside a stone mask: seam score s = -1 on the mask edge, rising to
++1 at --seam_width_mm inside (distance in mm from the pixel's depth). Per
+voxel after fusion: V = share of the frames seeing it that put it inside a
+mask, S = mean s over those frames. Step 06 transfers V and S to the raw RGB
+mesh and culls.
 
 Usage:
   python scripts/05_sam3_score.py \\
       --frames_dir     /path/to/frames \\
-      --mask_cache_dir /path/to/frames/sam3_mask_cache_conf_0.3 \\
+      --mask_cache_dir /path/to/frames/sam3_merged_individual_stone+paper_label_conf_0.5 \\
       --trajectory     output/sparse/trajectory_open3d.log \\
       --output_dir     output/scoring
 """
@@ -42,7 +42,7 @@ from pipeline_common import (
     load_intrinsic,
     load_frame_poses,
 )
-from alpha_common import precompute_alphas
+from vote_common import decode_votes, precompute_edts, vote_rgb
 
 
 def _create_tsdf_volume(voxel_size, depth_max):
@@ -58,25 +58,26 @@ def _create_tsdf_volume(voxel_size, depth_max):
 # Semantic TSDF integration
 # ---------------------------------------------------------------------------
 
-def integrate_semantic_tsdf(frames_dir, intrinsic, poses, alpha_dir,
-                             depth_scale=1000.0, depth_max=3.0,
-                             voxel_size=0.005, depth_min_m=0.15):
+def integrate_vote_tsdf(frames_dir, intrinsic, poses, edt_dir,
+                        seam_width_mm, seam_gamma,
+                        depth_scale=1000.0, depth_max=3.0,
+                        voxel_size=0.005, depth_min_m=0.15):
     color_files, depth_files = get_rgbd_file_lists(frames_dir)
     n_frames = min(len(color_files), len(depth_files), len(poses))
-    print(f"\n  Semantic TSDF: {n_frames} frames")
+    fx = intrinsic.get_focal_length()[0]
+    print(f"\n  Semantic TSDF: {n_frames} frames  seam width {seam_width_mm} mm  "
+          f"gamma {seam_gamma}")
 
     volume = _create_tsdf_volume(voxel_size, depth_max)
     for idx in tqdm(range(n_frames), desc="Semantic TSDF"):
         if poses[idx] is None:   # not tracked by ORB-SLAM3
             continue
-        alpha_path = os.path.join(alpha_dir, f"alpha_{idx:06d}.npz")
-        alpha    = np.load(alpha_path)['alpha']
-        a_uint8  = (np.clip(alpha, 0.0, 1.0) * 255).astype(np.uint8)
-        alpha_rgb = np.stack([a_uint8, a_uint8, a_uint8], axis=-1)
         depth_np = np.asarray(o3d.io.read_image(depth_files[idx]))
         depth_np = apply_depth_filter(depth_np, depth_scale, depth_min_m)
+        vote_np  = vote_rgb(os.path.join(edt_dir, f"edt_{idx:06d}.npz"), depth_np,
+                            depth_scale, fx, seam_width_mm, seam_gamma)
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d.geometry.Image(alpha_rgb),
+            o3d.geometry.Image(vote_np),
             o3d.geometry.Image(depth_np.astype(np.uint16)),
             depth_scale=depth_scale, depth_trunc=depth_max,
             convert_rgb_to_intensity=False,
@@ -86,8 +87,15 @@ def integrate_semantic_tsdf(frames_dir, intrinsic, poses, alpha_dir,
     print("  ✓ Semantic TSDF complete — extracting mesh…")
     mesh = volume.extract_triangle_mesh()
     mesh.compute_vertex_normals()
-    print(f"  Alpha mesh vertices: {len(mesh.vertices):,}")
+    print(f"  Vote mesh vertices: {len(mesh.vertices):,}")
     return mesh
+
+
+def print_vote_summary(mesh):
+    vote, score = decode_votes(mesh.vertex_colors)
+    pct = lambda v: '  '.join(f"p{p} {np.percentile(v, p):+.2f}" for p in (10, 50, 90))
+    print(f"  vote V  : {pct(vote)}   (V = 0 on {np.mean(vote < 1e-6):.1%} of vertices)")
+    print(f"  score S : {pct(score[vote > 1e-6])}   (vertices with V > 0)")
 
 
 # ---------------------------------------------------------------------------
@@ -96,18 +104,20 @@ def integrate_semantic_tsdf(frames_dir, intrinsic, poses, alpha_dir,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 05 — SAM3 EDT scoring + semantic TSDF")
+        description="Step 05 — SAM3 seam votes + semantic TSDF")
     parser.add_argument('--frames_dir',         required=True)
     parser.add_argument('--mask_cache_dir',      required=True,
                         help='L1 mask cache directory (step 04 output)')
     parser.add_argument('--trajectory',         required=True,
                         help='trajectory_open3d.log (step 02 output)')
     parser.add_argument('--output_dir',         required=True,
-                        help='Directory to write alpha_maps/ and alpha_mesh.ply')
+                        help='Directory to write edt_maps/ and vote_mesh.ply')
     parser.add_argument('--intrinsic',          default=None)
     parser.add_argument('--sam_max_size_ratio', type=float, default=0.15)
-    parser.add_argument('--edt_gamma',          type=float, default=0.5,
-                        help='EDT gamma: <1 = sharp seams, >1 = conservative')
+    parser.add_argument('--seam_width_mm',      type=float, default=12.0,
+                        help='Seam score rises from -1 at a mask edge to +1 this far inside (mm)')
+    parser.add_argument('--seam_gamma',         type=float, default=1.0,
+                        help='Score falloff shape: <1 rises fast (narrow seam), 1 linear, >1 wide')
     parser.add_argument('--voxel_size',         type=float, default=0.005)
     parser.add_argument('--depth_max',          type=float, default=3.0)
     parser.add_argument('--depth_min',          type=float, default=0.15)
@@ -117,12 +127,12 @@ def main():
         args.intrinsic = os.path.join(args.frames_dir, 'intrinsic.json')
 
     print("=" * 60)
-    print("Step 05 — SAM3 EDT Scoring")
+    print("Step 05 — SAM3 Seam Votes")
     print("=" * 60)
     print(f"  frames_dir     : {args.frames_dir}")
     print(f"  mask_cache_dir : {args.mask_cache_dir}")
     print(f"  output_dir     : {args.output_dir}")
-    print(f"  edt_gamma      : {args.edt_gamma}")
+    print(f"  seam           : {args.seam_width_mm} mm, gamma {args.seam_gamma}")
 
     if not os.path.isdir(args.mask_cache_dir):
         print(f"ERROR: mask_cache_dir not found: {args.mask_cache_dir}")
@@ -136,8 +146,8 @@ def main():
     poses = load_frame_poses(args.trajectory, args.frames_dir)
 
     color_files, _ = get_rgbd_file_lists(args.frames_dir)
-    n_frames  = min(len(color_files), len(poses))
-    alpha_dir = os.path.join(args.output_dir, 'alpha_maps')
+    n_frames = min(len(color_files), len(poses))
+    edt_dir  = os.path.join(args.output_dir, 'edt_maps')
 
     # Verify L1 cache coverage
     n_cached = sum(1 for i in range(n_frames)
@@ -147,30 +157,31 @@ def main():
         print(f"WARNING: {n_frames - n_cached} frames missing from L1 cache — "
               "those frames will raise an error during EDT computation.")
 
-    precompute_alphas(
+    precompute_edts(
         cache_dir=args.mask_cache_dir,
-        alpha_dir=alpha_dir,
-        color_files=color_files,
+        edt_dir=edt_dir,
         n_frames=n_frames,
-        sam_max_size_ratio=args.sam_max_size_ratio,
-        edt_gamma=args.edt_gamma,
+        max_size_ratio=args.sam_max_size_ratio,
     )
 
-    alpha_mesh = integrate_semantic_tsdf(
+    vote_mesh = integrate_vote_tsdf(
         args.frames_dir, intrinsic, poses,
-        alpha_dir=alpha_dir,
+        edt_dir=edt_dir,
+        seam_width_mm=args.seam_width_mm,
+        seam_gamma=args.seam_gamma,
         depth_scale=depth_scale,
         depth_max=args.depth_max,
         voxel_size=args.voxel_size,
         depth_min_m=args.depth_min,
     )
+    print_vote_summary(vote_mesh)
 
-    alpha_mesh_path = os.path.join(args.output_dir, 'alpha_mesh.ply')
-    o3d.io.write_triangle_mesh(alpha_mesh_path, alpha_mesh)
-    size_mb = os.path.getsize(alpha_mesh_path) / 1024**2
-    print(f"\n✓ alpha_mesh.ply saved: {alpha_mesh_path}  ({size_mb:.1f} MB)")
-    print(f"  alpha_maps/ : {alpha_dir}/")
-    print(f"\nNext: run step 06 with --raw_mesh <path> --alpha_mesh {alpha_mesh_path}")
+    vote_mesh_path = os.path.join(args.output_dir, 'vote_mesh.ply')
+    o3d.io.write_triangle_mesh(vote_mesh_path, vote_mesh)
+    size_mb = os.path.getsize(vote_mesh_path) / 1024**2
+    print(f"\n✓ vote_mesh.ply saved: {vote_mesh_path}  ({size_mb:.1f} MB)")
+    print(f"  edt_maps/ : {edt_dir}/")
+    print(f"\nNext: run step 06 with --raw_mesh <path> --vote_mesh {vote_mesh_path}")
 
 
 if __name__ == "__main__":

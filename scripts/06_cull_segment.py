@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 """
-06_cull_segment.py — Transfer alpha scores, cull seam triangles, and segment
+06_cull_segment.py — Transfer seam votes, cull seam triangles, and segment
 the wall into individual stone submeshes.
 
 Reads:
   --raw_mesh    raw_mesh_rgb.ply        (step 03 output)
-  --alpha_mesh  alpha_mesh.ply          (step 05 output)
+  --vote_mesh   vote_mesh.ply           (step 05 output; encoding: vote_common.py)
 
-For each alpha threshold value:
-  1. Transfer alpha scores from alpha_mesh → raw_mesh vertices (KD-tree)
+  1. Transfer vote V and seam score S from vote_mesh → raw_mesh vertices (KD-tree)
   2. Optionally clean small floating fragments (keep N largest components)
+  A vertex is seam when V < --vote_min (too few views put it inside a stone
+  mask) or S < the score threshold. For each score threshold:
   3. Optionally propagate boundary (BFS hop fattening)
-  4. Cull triangles whose vertices fall below the threshold
+  4. Cull triangles with a seam vertex
   5. Segment remaining mesh into connected stone patches
 
-Outputs per threshold in <output_dir>/thresh_<t>/:
+Outputs per score threshold in <output_dir>/thresh_<t>_vote_<v>/:
   culled_mesh_rgb.ply   — culled RGB mesh
   segments.ply          — pseudo-colour segment visualisation
   sam3_segments/        — individual stone PLY submeshes
 
-Shared outputs in <output_dir>/:
-  score_map_mesh.ply    — raw mesh coloured by alpha score (diagnostic)
+Shared outputs in <output_dir>/ (diagnostics, red = low):
+  score_map_mesh.ply    — raw mesh coloured by seam score S
+  vote_map_mesh.ply     — raw mesh coloured by vote V
 
 Usage:
   python scripts/06_cull_segment.py \\
       --raw_mesh   output/raw_mesh_rgb.ply \\
-      --alpha_mesh output/scoring/alpha_mesh.ply \\
+      --vote_mesh  output/scoring/vote_mesh.ply \\
       --output_dir output/segments
 """
 
@@ -36,23 +38,25 @@ import os
 from tqdm import tqdm
 from scipy.spatial import cKDTree
 
+from vote_common import decode_votes
+
 
 # ---------------------------------------------------------------------------
 # Score transfer
 # ---------------------------------------------------------------------------
 
-def transfer_alpha_scores(raw_mesh, alpha_mesh):
-    """KD-tree nearest-neighbour: alpha_mesh vertex scores → raw_mesh vertices."""
-    raw_pts   = np.asarray(raw_mesh.vertices)
-    alpha_pts = np.asarray(alpha_mesh.vertices)
-    alpha_col = np.asarray(alpha_mesh.vertex_colors)   # R=G=B=score
+def transfer_votes(raw_mesh, vote_mesh):
+    """KD-tree nearest-neighbour: vote_mesh (vote V, score S) → raw_mesh vertices."""
+    raw_pts  = np.asarray(raw_mesh.vertices)
+    vote_pts = np.asarray(vote_mesh.vertices)
+    vote, score = decode_votes(vote_mesh.vertex_colors)
 
-    tree = cKDTree(alpha_pts)
+    tree = cKDTree(vote_pts)
     _, idx = tree.query(raw_pts, k=1, workers=-1)
-    scores = alpha_col[idx, 0].astype(np.float32)
-    print(f"  Score transfer: min={scores.min():.3f}  "
-          f"mean={scores.mean():.3f}  max={scores.max():.3f}")
-    return scores
+    vote, score = vote[idx], score[idx]
+    print(f"  Vote V : mean {vote.mean():.3f}   V = 0 on {np.mean(vote < 1e-6):.1%}")
+    print(f"  Score S: mean {score[vote > 1e-6].mean():+.3f} (vertices with V > 0)")
+    return vote, score
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +152,9 @@ def make_segment_color_mesh(mesh, vertex_labels):
 # Culling
 # ---------------------------------------------------------------------------
 
-def cull_mesh_by_alpha(mesh, alpha_scores, alpha_threshold):
+def cull_mesh_by_score(mesh, scores, threshold):
     triangles = np.asarray(mesh.triangles)
-    keep      = np.all(alpha_scores[triangles] >= alpha_threshold, axis=1)
+    keep      = np.all(scores[triangles] >= threshold, axis=1)
     culled    = o3d.geometry.TriangleMesh(mesh)
     culled.remove_triangles_by_mask(~keep)
     culled.remove_unreferenced_vertices()
@@ -211,13 +215,14 @@ def segment_mesh_with_boundaries(mesh, is_boundary):
 # Per-threshold runner
 # ---------------------------------------------------------------------------
 
-def run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size,
+def run_threshold(mesh, scores, threshold, hops, min_cluster_size,
                   thresh_dir, save_segments=True):
+    """scores: seam score S, with vertices below the vote cut set below any threshold."""
     os.makedirs(thresh_dir, exist_ok=True)
-    is_boundary = alpha_scores < threshold
+    is_boundary = scores < threshold
     n_seam = is_boundary.sum()
-    print(f"\n── threshold={threshold:g}  seam: {n_seam:,}/{len(alpha_scores):,} "
-          f"({100*n_seam/len(alpha_scores):.1f}%) ──")
+    print(f"\n── threshold={threshold:g}  seam: {n_seam:,}/{len(scores):,} "
+          f"({100*n_seam/len(scores):.1f}%) ──")
     print(f"   {thresh_dir}")
 
     if hops > 0:
@@ -226,7 +231,7 @@ def run_threshold(mesh, alpha_scores, threshold, hops, min_cluster_size,
     else:
         is_boundary_final = is_boundary
 
-    culled = cull_mesh_by_alpha(mesh, alpha_scores, threshold)
+    culled = cull_mesh_by_score(mesh, scores, threshold)
     culled_path = os.path.join(thresh_dir, 'culled_mesh_rgb.ply')
     o3d.io.write_triangle_mesh(culled_path, culled)
     print(f"  ✓ culled_mesh_rgb.ply  ({os.path.getsize(culled_path)/1024**2:.1f} MB)")
@@ -272,12 +277,15 @@ def main():
         description="Step 06 — Cull seams and segment into stones")
     parser.add_argument('--raw_mesh',    required=True,
                         help='raw_mesh_rgb.ply (step 03 output)')
-    parser.add_argument('--alpha_mesh',  required=True,
-                        help='alpha_mesh.ply (step 05 output)')
+    parser.add_argument('--vote_mesh',   required=True,
+                        help='vote_mesh.ply (step 05 output)')
     parser.add_argument('--output_dir',  required=True,
-                        help='Directory for score_map_mesh.ply and thresh_*/')
-    parser.add_argument('--alpha_thresholds', type=float, nargs='+', default=[0.3],
-                        help='One or more thresholds to sweep (default: 0.3)')
+                        help='Directory for score/vote map meshes and thresh_*/')
+    parser.add_argument('--score_thresholds', type=float, nargs='+', default=[0.0],
+                        help='Seam score thresholds to sweep, S in [-1, 1] (default: 0)')
+    parser.add_argument('--vote_min', type=float, default=0.3,
+                        help='Min share of views that put a vertex inside a stone mask '
+                             '(default 0.3)')
     parser.add_argument('--mesh_keep_components', type=int, default=1,
                         help='Keep N largest mesh components before scoring (0=off)')
     parser.add_argument('--boundary_propagation_hops', type=int, default=0,
@@ -292,11 +300,11 @@ def main():
     print("Step 06 — Cull + Segment")
     print("=" * 60)
     print(f"  raw_mesh   : {args.raw_mesh}")
-    print(f"  alpha_mesh : {args.alpha_mesh}")
+    print(f"  vote_mesh  : {args.vote_mesh}")
     print(f"  output_dir : {args.output_dir}")
-    print(f"  thresholds : {args.alpha_thresholds}")
+    print(f"  thresholds : {args.score_thresholds}  vote_min: {args.vote_min}")
 
-    for label, path in [("raw_mesh", args.raw_mesh), ("alpha_mesh", args.alpha_mesh)]:
+    for label, path in [("raw_mesh", args.raw_mesh), ("vote_mesh", args.vote_mesh)]:
         if not os.path.exists(path):
             print(f"ERROR: {label} not found: {path}")
             import sys; sys.exit(1)
@@ -305,40 +313,47 @@ def main():
 
     print("\nLoading meshes…")
     raw_mesh   = o3d.io.read_triangle_mesh(args.raw_mesh)
-    alpha_mesh = o3d.io.read_triangle_mesh(args.alpha_mesh)
+    vote_mesh  = o3d.io.read_triangle_mesh(args.vote_mesh)
     raw_mesh.compute_vertex_normals()
     print(f"  raw_mesh   : {len(raw_mesh.vertices):,} vertices")
-    print(f"  alpha_mesh : {len(alpha_mesh.vertices):,} vertices")
+    print(f"  vote_mesh  : {len(vote_mesh.vertices):,} vertices")
 
     if args.mesh_keep_components > 0:
         raw_mesh = clean_mesh_keep_largest(raw_mesh, args.mesh_keep_components)
 
-    print("\nTransferring alpha scores…")
-    alpha_scores = transfer_alpha_scores(raw_mesh, alpha_mesh)
-    del alpha_mesh
+    print("\nTransferring votes…")
+    vote, score = transfer_votes(raw_mesh, vote_mesh)
+    del vote_mesh
 
-    score_map = make_boundary_score_mesh(raw_mesh, 1.0 - alpha_scores)
     score_path = os.path.join(args.output_dir, 'score_map_mesh.ply')
-    o3d.io.write_triangle_mesh(score_path, score_map)
-    print(f"  ✓ score_map_mesh.ply → {score_path}")
-    del score_map
+    vote_path  = os.path.join(args.output_dir, 'vote_map_mesh.ply')
+    for path, value in [(score_path, (score + 1.0) / 2.0), (vote_path, vote)]:
+        o3d.io.write_triangle_mesh(path, make_boundary_score_mesh(raw_mesh, 1.0 - value))
+        print(f"  ✓ {os.path.basename(path)} → {path}")
 
-    thresholds = sorted(set(args.alpha_thresholds))
+    # Vertices too few views call stone are seam at every score threshold.
+    scores = np.where(vote >= args.vote_min, score, -2.0).astype(np.float32)
+    print(f"  Below vote_min {args.vote_min:g}: {np.mean(vote < args.vote_min):.1%} of vertices")
+
+    thresholds = sorted(set(args.score_thresholds))
+    thresh_dirs = {t: os.path.join(args.output_dir, f"thresh_{t:g}_vote_{args.vote_min:g}")
+                   for t in thresholds}
     for t in thresholds:
         run_threshold(
-            raw_mesh, alpha_scores,
+            raw_mesh, scores,
             threshold=t,
             hops=args.boundary_propagation_hops,
             min_cluster_size=args.min_cluster_size,
-            thresh_dir=os.path.join(args.output_dir, f"thresh_{t:g}"),
+            thresh_dir=thresh_dirs[t],
             save_segments=not args.skip_segments,
         )
 
     print("\n" + "=" * 60)
     print("Step 06 complete")
     print(f"  score_map_mesh.ply : {score_path}")
+    print(f"  vote_map_mesh.ply  : {vote_path}")
     for t in thresholds:
-        print(f"  thresh_{t:g}/       : {os.path.join(args.output_dir, f'thresh_{t:g}')}/")
+        print(f"  {os.path.basename(thresh_dirs[t])}/ : {thresh_dirs[t]}/")
 
 
 if __name__ == "__main__":

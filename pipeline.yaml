@@ -16,14 +16,20 @@
 #                                   orbslam_settings.yaml (read by registration 02a)
 #     raw_mesh_rgb.ply     step 03
 #     batches/             step 03b
-#     scoring/             step 05  alpha_maps/, alpha_mesh.ply  (05b: alpha_batches/)
+#     scoring/             step 05  edt_maps/, vote_mesh.ply  (05b: vote_batches/)
 #     segments/            step 06 / 06b
 #     export/              step 07  cloud.ply, cameras.obj (for Rhino)
 
 paths:
   # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pc_long.bag
-  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pole_long.bag #big drifts do not use
-  bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pole_short.bag
+
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pole_short.bag
+
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251101_scan1.bag
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251101_scan2.bag
+  # bag: /home/chengzhe/Data/OMS_data3/rs_bags/260127_scan1.bag
+  bag: /home/chengzhe/Data/OMS_data3/rs_bags/260127_scan2.bag
+
   output_base: output
   run_name: ""          # "" = bag file name without .bag
   frames_dir: ""        # "" = <run dir>/frames; set to reuse frames elsewhere
@@ -57,7 +63,7 @@ orbslam:                # step 02 — ORB-SLAM3 settings; camera K comes from fr
   th_depth: 40.0        # close/far split at th_depth * stereo_b metres
   stereo_b: 0.095       # D456 stereo baseline (m)
 
-tsdf:                   # steps 03, 03b, 05, 05b — keep RGB and alpha meshes consistent
+tsdf:                   # steps 03, 03b, 05, 05b — keep RGB and vote meshes consistent
   voxel_size: 0.005     # metres
   depth_max: 3.0        # metres
   depth_min: 0.15       # metres
@@ -67,28 +73,32 @@ batch:                  # steps 03b, 05b — must match for 1-to-1 batch pairing
   size: 100             # frames per batch
   overlap: 15           # overlap frames between batches
 
-sam3:                   # step 04 (mask cache); confidence also names the cache dir used by 05
+sam3:                   # step 04 (mask cache); prompts + confidence also name the cache dir used by 05
   prompt: "individual stone"
   confidence: 0.5
-  qr_prompt: "QR code marker"
-  qr_ring_px: 20        # dilation ring for enclosure check (pixels)
-  qr_min_coverage: 0.6  # fraction of QR ring that must be stone
-  skip_qr_recovery: false   # true = 05 reads the raw stone cache
+  label_prompt: "paper label"
+  label_ring_px: 3      # label grown by this; the grown outer edge is the perimeter tested
+  label_min_coverage: 0.6   # share of that perimeter a stone must cover to take the label
+  label_grow_px: 2      # merged area = label grown by this, never into another stone
+  skip_label_recovery: false   # true = no label prompt/merge; 05 reads the raw stone cache
   n_workers: 4
 
-score:                  # steps 05, 05b
-  edt_gamma: 0.4        # <1 sharp seams, 1 linear, >1 conservative
-  sam_max_size_ratio: 0.15
+score:                  # steps 05, 05b — per-frame seam score s: -1 on a mask edge … +1 inside
+  seam_width_mm: 12     # distance inside a mask (mm, from depth) where s reaches +1
+  seam_gamma: 1.0       # s falloff: <1 rises fast (narrow seam), 1 linear, >1 wide
+  sam_max_size_ratio: 0.15  # masks larger than this share of the image are ignored
 
 cull:                   # step 06
-  alpha_thresholds: [0.35]  # each value → thresh_<t>/ subdir
+  score_thresholds: [0.0]   # seam score S cut, S in [-1, 1]; each → thresh_<t>_vote_<v>/
+  vote_min: 0.3             # cull where fewer than this share of views put it inside a stone mask
   mesh_keep_components: 1   # keep N largest components (0 = off)
   boundary_hops: 0          # BFS hops to fatten seam network (0 = off)
   min_cluster_size: 1000    # min triangles per saved segment
   skip_segments: true       # true = threshold tuning only, no per-stone PLYs
 
 cull_batched:           # step 06b
-  alpha_threshold: 0.5
+  score_threshold: 0.0
+  vote_min: 0.3
   chunk_size: 500000    # vertices per KD-tree query chunk; lower if OOM
   save_score_maps: false
 
