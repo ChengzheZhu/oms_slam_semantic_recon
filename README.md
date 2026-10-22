@@ -24,7 +24,7 @@ Seven stages. Each stage is a root wrapper script `NN_*.sh` (reads `pipeline.yam
 | 04 | `04_sam3_mask.sh` | SAM3 **L1** mask cache; stone + paper-label prompts (one shared image encode); border filter + label recovery |
 | 05 | `05_sam3_score.sh` | **L2**: per-frame seam votes (inside mask + distance to its edge in mm) → semantic TSDF → `vote_mesh.ply` |
 | 06 | `06_cull_segment.sh` | transfer vote + seam score to the RGB mesh, cull seam triangles, segment into stone submeshes |
-| 07 | `07_export_rhino.sh` | export for Rhino: `cloud.ply` (TSDF surface points) + `cameras.obj` (camera cones, trajectory polyline); optional, not in `run_pipeline.sh` |
+| 07 | `07_export_rhino.sh` | export for Rhino: `cameras.obj` (camera cones, trajectory polyline); import the run's PLYs directly next to it (same SLAM world frame, metres); optional, not in `run_pipeline.sh` |
 
 **Two tracks:**
 - **Non-batched** (`03 → 05 → 06`) — single TSDF volume; fits in memory. Orchestrated by `run_pipeline.sh`.
@@ -110,7 +110,7 @@ output/<run>/                         gitignored results (default paths.output_b
     edt_maps/edt_*.npz          L2 EDT cache
     vote_mesh.ply               stage 05 semantic mesh (colour R, G = seam score, vote)
   segments/                     stage 06 culled mesh + per-stone submeshes
-  export/                       stage 07 cloud.ply + cameras.obj (SLAM world frame, export.units)
+  export/                       stage 07 cameras.obj (SLAM world frame, metres)
 ```
 
 ## Documentation

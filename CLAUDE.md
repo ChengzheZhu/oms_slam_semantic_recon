@@ -23,7 +23,7 @@ in a wrapper's OVERRIDES block or the environment win). No hard-coded paths in w
 | 04 | `04_sam3_mask.sh` → `04_sam3_mask.py` | SAM3 **L1** mask cache; one image-encode, two prompts (stone + paper label); label recovery |
 | 05 | `05_sam3_score.sh` → `05_sam3_score.py` | **L2**: per-frame inside mask + EDT → seam votes fused in a semantic TSDF → edt_maps/*.npz + vote_mesh.ply |
 | 06 | `06_cull_segment.sh` → `06_cull_segment.py` | KD-tree transfer vote/score→raw mesh, cull seam triangles, segment into stone submeshes |
-| 07 | `07_export_rhino.sh` → `07_export_rhino.py` | Rhino export: cloud.ply (mesh vertices = TSDF surface points, face-less PLY → Rhino point cloud) + cameras.obj (OpenCV-convention cone per posed frame `cam_NNNNNN`, trajectory as degree-1 curve). Not glTF: Rhino's glTF importer keeps triangle primitives only. Optional; not in run_pipeline.sh |
+| 07 | `07_export_rhino.sh` → `07_export_rhino.py` | Rhino export: cameras.obj only (OpenCV-convention cone per posed frame `cam_NNNNNN`, trajectory as degree-1 curve), metres. Geometry is not re-exported: every pipeline PLY is already in the SLAM world frame in metres (no step transforms a mesh after TSDF), so Rhino imports them directly; keep OBJ import's "Map OBJ Y to Rhino Z" off. Not glTF: Rhino's glTF importer keeps triangle primitives only. Optional; not in run_pipeline.sh |
 
 **Two tracks:**
 - **Non-batched** (`03 → 05 → 06`): single TSDF volume; orchestrated by `run_pipeline.sh`.
@@ -193,7 +193,7 @@ Output written to `<paths.output_base>/<run_name>/` (default `output/`, gitignor
     vote_batches/                 — batched track (05b)
   batches/                        — batched track (03b)
   segments/                       — stage 06 culled mesh + per-stone submeshes
-  export/                         — stage 07 cloud.ply + cameras.obj for Rhino (SLAM world frame)
+  export/                         — stage 07 cameras.obj for Rhino (SLAM world frame, metres)
 ```
 
 ## Tunable parameters

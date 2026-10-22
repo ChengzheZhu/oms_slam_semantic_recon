@@ -18,7 +18,7 @@
 #     batches/             step 03b
 #     scoring/             step 05  edt_maps/, vote_mesh.ply  (05b: vote_batches/)
 #     segments/            step 06 / 06b
-#     export/              step 07  cloud.ply, cameras.obj (for Rhino)
+#     export/              step 07  cameras.obj (for Rhino, with the PLYs above)
 
 paths:
   # bag: /home/chengzhe/Data/OMS_data3/rs_bags/251018_pc_long.bag
@@ -102,10 +102,7 @@ cull_batched:           # step 06b
   chunk_size: 500000    # vertices per KD-tree query chunk; lower if OOM
   save_score_maps: false
 
-export:                 # step 07 — cloud.ply (points) + cameras.obj (cones, trajectory) for Rhino
-  source: mesh          # mesh = step 03 raw_mesh_rgb.ply; batches = step 03b batches/*.ply
-  units: m              # m | cm | mm — files carry no units; match the Rhino document
-  voxel: 0              # point-cloud downsample, metres (0 = every TSDF surface point)
-  normals: false        # also write point normals (~45% larger cloud.ply)
+export:                 # step 07 — cameras.obj (cones, trajectory) for Rhino, metres; import the
+                        # run's PLYs directly next to it (same SLAM world frame, metres)
   cone_depth: 0.1      # cone length (camera centre to image plane), metres
   cone_every: 30         # cone for every Nth posed frame; trajectory keeps all poses
